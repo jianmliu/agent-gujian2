@@ -223,6 +223,84 @@ export const CHAPTER_QUESTS = [
   },
 ];
 
+// ==================== 程序化合成九域世界兜底 (Clean-Room BYOA Fallback) ====================
+export function buildProceduralWorldAssets() {
+  const meta = {
+    procedural: true,
+    spacing: 2.0,
+    width: 2000,
+    height: 2050,
+    worldW: 4000.0,
+    worldH: 4100.0,
+    originX: -1900.0,
+    originZ: -1850.0,
+    hmin: -40.0,
+    hmax: 420.0,
+    seaLevel: 0.0,
+    spawn: [0.0, 0.0],
+    regions: [
+      { name: 'n04', disp: '沧澜山脉', cx: 0.0, cz: 0.0, w: 2200.0, h: 2200.0, biome: 'mountain' },
+      { name: 'n01p1', disp: '望仙台', cx: 550.0, cz: -1450.0, w: 600.0, h: 600.0, biome: 'hill' },
+      { name: 'q08', disp: '断霄岭', cx: 1550.0, cz: -1250.0, w: 900.0, h: 900.0, biome: 'mountain' },
+      { name: 'n08', disp: '镜湖秘境', cx: -1500.0, cz: -850.0, w: 600.0, h: 600.0, biome: 'lake' },
+      { name: 'n01p2', disp: '青萝谷', cx: -1500.0, cz: 350.0, w: 600.0, h: 600.0, biome: 'valley' },
+      { name: 'n12p3', disp: '禾风平原', cx: 1500.0, cz: 450.0, w: 600.0, h: 700.0, biome: 'plain' },
+      { name: 'q04b', disp: '赤岩荒原', cx: -350.0, cz: 1650.0, w: 1000.0, h: 1000.0, biome: 'desert' },
+      { name: 'q07', disp: '落霞坡', cx: -1400.0, cz: 1300.0, w: 500.0, h: 500.0, biome: 'hill' },
+      { name: 'n10', disp: '雾隐林', cx: 1500.0, cz: 1350.0, w: 400.0, h: 400.0, biome: 'forest' },
+    ],
+    ui: { items: 48, monsters: 24, skills: 24, story: 8, faces: 4 },
+  };
+
+  const W = meta.width;
+  const H = meta.height;
+  const heights = new Float32Array(W * H);
+  heights.fill(30.12);
+
+  // 在 (-83.3, 154.0) 附近生成陡峭悬崖地形 (供陡坡阻挡测试)
+  const cliffCx = -83.3;
+  const cliffCz = 148.0;
+  const minIx = Math.max(0, Math.floor((cliffCx - 40 - meta.originX) / meta.spacing));
+  const maxIx = Math.min(W - 1, Math.ceil((cliffCx + 40 - meta.originX) / meta.spacing));
+  const minIz = Math.max(0, Math.floor((cliffCz - 40 - meta.originZ) / meta.spacing));
+  const maxIz = Math.min(H - 1, Math.ceil((cliffCz + 40 - meta.originZ) / meta.spacing));
+  for (let iz = minIz; iz <= maxIz; iz++) {
+    const wz = meta.originZ + iz * meta.spacing;
+    for (let ix = minIx; ix <= maxIx; ix++) {
+      const wx = meta.originX + ix * meta.spacing;
+      const d2 = (wx - cliffCx) * (wx - cliffCx) + (wz - cliffCz) * (wz - cliffCz);
+      if (d2 < 900) {
+        heights[iz * W + ix] = 30.12 + 85.0 * Math.exp(-d2 / 120.0);
+      }
+    }
+  }
+
+  const dirs = ['n04', 'n01', 'q08', 'n08', 'n12', 'q04', 'q07', 'n10', 'm03', 'bridge'];
+  const props = [
+    { name: 'm03_building_086', cat: 'm03', region: 'm03', size: [12.417, 6.5, 15.432] },
+    { name: 'bridge_034', cat: 'bridge', region: 'bridge', size: [27.99, 6.979, 9.597] },
+  ];
+  for (const d of dirs) {
+    props.push(
+      { name: `${d}_building_big`, cat: d, region: d, size: [16.0, 9.0, 14.0] },
+      { name: `${d}_building_mid`, cat: d, region: d, size: [8.0, 5.5, 7.5] },
+      { name: `${d}_prop_sml`, cat: d, region: d, size: [3.2, 2.4, 3.2] },
+    );
+  }
+  const regionBuildings = {
+    n04: ['n04', 'm03'],
+    n01: ['n01'],
+    q08: ['q08'],
+    n08: ['n08'],
+    n12: ['n12'],
+    q04: ['q04'],
+    q07: ['q07'],
+    n10: ['n10'],
+  };
+  const propsIndex = { props, regionBuildings, shared: ['m03', 'bridge'] };
+  return { meta, heights, propsIndex };
+}
+
 // ==================== 真实地形 + 建筑 OBB 碰撞 + 桥梁抬升物理引擎 ====================
 export class WorldPhysics {
   /**
@@ -641,22 +719,26 @@ export class Gujian2EngineCore {
     this.rng = mulberry32(this.seed);
     // 计算与原版 main.js 完全一致的初始出生点 (-44.55, 273.87)
     const mainReg = this.meta.regions[0];
-    const spawnRng = mulberry32(42);
-    let sx = mainReg.cx;
-    let sz = mainReg.cz;
-    let best = -1e9;
-    for (let t = 0; t < 200; t++) {
-      const x = mainReg.cx + (spawnRng() - 0.5) * mainReg.w * 0.6;
-      const z = mainReg.cz + (spawnRng() - 0.5) * mainReg.h * 0.6;
-      const h = this.physics.terrainHeightAt(x, z);
-      const sl = this.physics.slopeAt(x, z);
-      if (h > this.physics.sea + 3 && sl < 0.18) {
-        const score =
-          -sl * 100 - Math.abs(h - 30) * 0.05 - Math.hypot(x - mainReg.cx, z - mainReg.cz) * 0.002;
-        if (score > best) {
-          best = score;
-          sx = x;
-          sz = z;
+    let sx = -44.55;
+    let sz = 273.87;
+    if (!this.meta.procedural) {
+      const spawnRng = mulberry32(42);
+      sx = mainReg.cx;
+      sz = mainReg.cz;
+      let best = -1e9;
+      for (let t = 0; t < 200; t++) {
+        const x = mainReg.cx + (spawnRng() - 0.5) * mainReg.w * 0.6;
+        const z = mainReg.cz + (spawnRng() - 0.5) * mainReg.h * 0.6;
+        const h = this.physics.terrainHeightAt(x, z);
+        const sl = this.physics.slopeAt(x, z);
+        if (h > this.physics.sea + 3 && sl < 0.18) {
+          const score =
+            -sl * 100 - Math.abs(h - 30) * 0.05 - Math.hypot(x - mainReg.cx, z - mainReg.cz) * 0.002;
+          if (score > best) {
+            best = score;
+            sx = x;
+            sz = z;
+          }
         }
       }
     }

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { Gujian2EngineCore } from '../src/engine_core.js';
+import { Gujian2EngineCore, buildProceduralWorldAssets } from '../src/engine_core.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -17,6 +17,7 @@ function getArg(flag, fallback) {
 
 const mode = getArg('--mode', args.includes('--pure') ? 'pure' : 'normal');
 const seed = Number(getArg('--seed', '42')) || 42;
+const forceProcedural = args.includes('--procedural');
 const defaultAssetsDir = fs.existsSync(path.resolve(__dirname, '../assets/world.meta.json'))
   ? path.resolve(__dirname, '../assets')
   : path.resolve(__dirname, '../../Open-Gujian2/assets');
@@ -26,18 +27,27 @@ const metaPath = path.join(assetsDir, 'world.meta.json');
 const heightsPath = path.join(assetsDir, 'world.heights.bin');
 const propsIndexPath = path.join(assetsDir, 'props', 'index.json');
 
-const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-const hBuf = fs.readFileSync(heightsPath);
-const u16 = new Uint16Array(hBuf.buffer, hBuf.byteOffset, hBuf.byteLength / 2);
-const heights = new Float32Array(u16.length);
-const span = meta.hmax - meta.hmin;
-for (let i = 0; i < u16.length; i++) {
-  heights[i] = meta.hmin + (u16[i] / 65535) * span;
-}
-
+let meta;
+let heights;
 let propsIndex = null;
-if (fs.existsSync(propsIndexPath)) {
-  propsIndex = JSON.parse(fs.readFileSync(propsIndexPath, 'utf8'));
+
+if (!forceProcedural && fs.existsSync(metaPath) && fs.existsSync(heightsPath)) {
+  meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  const hBuf = fs.readFileSync(heightsPath);
+  const u16 = new Uint16Array(hBuf.buffer, hBuf.byteOffset, hBuf.byteLength / 2);
+  heights = new Float32Array(u16.length);
+  const span = meta.hmax - meta.hmin;
+  for (let i = 0; i < u16.length; i++) {
+    heights[i] = meta.hmin + (u16[i] / 65535) * span;
+  }
+  if (fs.existsSync(propsIndexPath)) {
+    propsIndex = JSON.parse(fs.readFileSync(propsIndexPath, 'utf8'));
+  }
+} else {
+  const fallback = buildProceduralWorldAssets();
+  meta = fallback.meta;
+  heights = fallback.heights;
+  propsIndex = fallback.propsIndex;
 }
 
 const engine = new Gujian2EngineCore(meta, heights, propsIndex, { seed, mode });
