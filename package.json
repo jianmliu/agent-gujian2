@@ -1,0 +1,15 @@
+{
+  "name": "agent-gujian2",
+  "version": "1.0.0",
+  "description": "Gujian 2 (《古剑奇谭二：永夜初晗凝碧天》) Deterministic Headless AI Evaluation Host & 3D Open-World Dual-Runtime",
+  "type": "module",
+  "bin": {
+    "agent-gujian2-host": "./bin/agent-gujian2-host.mjs"
+  },
+  "scripts": {
+    "test": "node ./test/run-headless-bench.mjs --mode normal && node ./test/run-headless-bench.mjs --mode pure",
+    "test:headless": "node ./test/run-headless-bench.mjs --mode normal && node ./test/run-headless-bench.mjs --mode pure",
+    "host": "node ./bin/agent-gujian2-host.mjs --mode normal",
+    "host:pure": "node ./bin/agent-gujian2-host.mjs --mode pure"
+  }
+}
