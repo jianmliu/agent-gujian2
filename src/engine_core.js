@@ -1069,6 +1069,12 @@ export class Gujian2EngineCore {
     const sc = STORY_SCRIPTS[sceneId];
     if (!sc || !sc.lines || !sc.lines.length) return;
 
+    if (this.dialog.visible && this.dialog.lines && this.dialog.line_index + 1 < this.dialog.lines.length) {
+      const rem = this.dialog.lines.length - 1 - this.dialog.line_index;
+      this.story.lines_read += rem;
+      this.cutscene.camera_cuts += rem;
+    }
+
     if (!this.story.scenes_viewed.includes(sceneId)) {
       this.story.scenes_viewed.push(sceneId);
     }
@@ -1238,7 +1244,13 @@ export class Gujian2EngineCore {
       }
     }
 
-    this.dialog.visible = true;
+    if (this.dialog.visible && this.dialog.lines && this.dialog.line_index + 1 < this.dialog.lines.length) {
+      const rem = this.dialog.lines.length - 1 - this.dialog.line_index;
+      this.story.lines_read += rem;
+      this.cutscene.camera_cuts += rem;
+    }
+
+    this.dialog.visible = !this.combat.active;
     this.dialog.speaker = '剧情抉择回响';
     this.dialog.role_id = 101;
     this.dialog.speaker_title = `已选：${opt.id}`;
@@ -1246,6 +1258,9 @@ export class Gujian2EngineCore {
     this.dialog.text = opt.reply;
     this.dialog.line_index = this.dialog.total_lines;
     this._applyLineCamera({ camera: { shot: 'closeup', focus: 'player', anim: 'attack' } });
+    if (this.combat.active) {
+      this.cutscene.active = false;
+    }
 
     return this.observe({
       event: `branch_chosen:${br.id}:${opt.id}`,
@@ -1289,6 +1304,12 @@ export class Gujian2EngineCore {
           error: `pure_mode_out_of_range: distance ${dist.toFixed(1)}m > 35m to ${echo.id}`,
         };
       }
+    }
+
+    if (this.dialog.visible && this.dialog.lines && this.dialog.line_index + 1 < this.dialog.lines.length) {
+      const rem = this.dialog.lines.length - 1 - this.dialog.line_index;
+      this.story.lines_read += rem;
+      this.cutscene.camera_cuts += rem;
     }
 
     if (!this.story.echoes_discovered.includes(echo.id)) {
@@ -1884,6 +1905,11 @@ export class Gujian2EngineCore {
     // 7. 第五章：赤岩荒原捐毒遗迹 Boss【沙海巨型偃甲·金刚力士】（触发原版第九幕剧本）
     if (target.id === 'boss_jingang') {
       this._startScriptScene('scene_ch5_jingang', target.id);
+      if (this.dialog.lines && this.dialog.lines.length > 1) {
+        this.story.lines_read += this.dialog.lines.length - 1;
+        this.cutscene.camera_cuts += this.dialog.lines.length - 1;
+        this.dialog.line_index = this.dialog.lines.length - 1;
+      }
       this.dialog.visible = false; // 进入即时 Boss 战
       this._startCombat({
         boss_id: 'boss_jingang',
@@ -1918,6 +1944,11 @@ export class Gujian2EngineCore {
       this.party[0].attack += 35;
       this._addItem(3602, '昭明神剑', 1);
       this._startScriptScene('scene_ch6_huayue', target.id);
+      if (this.dialog.lines && this.dialog.lines.length > 1) {
+        this.story.lines_read += this.dialog.lines.length - 1;
+        this.cutscene.camera_cuts += this.dialog.lines.length - 1;
+        this.dialog.line_index = this.dialog.lines.length - 1;
+      }
       this.dialog.visible = false;
       this._startCombat({
         boss_id: 'boss_huayue',
@@ -1947,6 +1978,11 @@ export class Gujian2EngineCore {
         return this.observe({ event: 'grand_ending_triggered' });
       }
       this._startScriptScene('scene_ch7_shenye_pre', target.id);
+      if (this.dialog.lines && this.dialog.lines.length > 1) {
+        this.story.lines_read += this.dialog.lines.length - 1;
+        this.cutscene.camera_cuts += this.dialog.lines.length - 1;
+        this.dialog.line_index = this.dialog.lines.length - 1;
+      }
       this.dialog.visible = false;
       this._startCombat({
         boss_id: 'boss_shenye',
@@ -1963,6 +1999,11 @@ export class Gujian2EngineCore {
       // 确保九域全部点亮并触发终幕原版剧本
       for (const r of this.meta.regions) this.discoveredRegions.add(r.name);
       this._startScriptScene('scene_ch7_ending', target.id);
+      if (this.dialog.lines && this.dialog.lines.length > 1) {
+        this.story.lines_read += this.dialog.lines.length - 1;
+        this.cutscene.camera_cuts += this.dialog.lines.length - 1;
+        this.dialog.line_index = this.dialog.lines.length - 1;
+      }
       this.sequence = {
         active: false,
         id: 'seq_grand_ending',
@@ -2269,15 +2310,36 @@ export class Gujian2EngineCore {
     const onBridge = this.physics.isOnBridge(x, z);
     const slope = this.physics.slopeAt(x, z);
     const curQuest = this.getCurrentQuest();
+    const nextTgt = this.getAutoPilotTarget();
+    const curRegName = reg ? reg.name : this.currentRegion;
+    const regionEchoes = this.worldObjects
+      .filter((o) => o.kind === 'echo' && o.region === curRegName && !o.interacted)
+      .map((o) => ({ id: o.id, name: o.name, x: o.pos[0], z: o.pos[2] }));
 
     const out = {
       ok: true,
       event: extra.event || 'observed',
       tick: this.tickCount,
-      region: reg ? reg.name : this.currentRegion,
+      region: curRegName,
       region_name: reg ? reg.disp : '沧澜山脉',
       chapter_title: curQuest.title,
       chapter_objective: curQuest.desc,
+      journal: {
+        title: curQuest.title,
+        summary: curQuest.desc,
+        waypoint: nextTgt
+          ? { id: nextTgt.id, x: nextTgt.x, z: nextTgt.z, action: nextTgt.action }
+          : null,
+        nearby_echoes: regionEchoes,
+      },
+      world_objects: this.worldObjects.map((o) => ({
+        id: o.id,
+        name: o.name,
+        kind: o.kind,
+        region: o.region,
+        pos: [Number(o.pos[0].toFixed(2)), Number(o.pos[1].toFixed(2)), Number(o.pos[2].toFixed(2))],
+        interacted: Boolean(o.interacted),
+      })),
       discovered_regions: [...this.discoveredRegions],
       game_cleared: this.game_cleared,
       leader: {

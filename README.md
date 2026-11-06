@@ -28,13 +28,42 @@
 
 ---
 
+## 🏆 Pure 模式（零先验盲测）全剧情通关排行榜 (100% All-Story Completion Leaderboard)
+
+在严格的 **`pure` 模式（零先验 / 防作弊盲测）** 下，隐藏内部 `quest_stage` 与 `diagnostics`，要求智能体必须通过 `move_to` 走到交互点 `35m` 范围内才能执行 `interact`、`solve_mechanism` 或 `trigger_echo`，每轮最多允许执行 2 个动作指令，禁止编写外部自动化脚本，并完成**100% 全剧情全要素收集**：
+- **7/7 主线章节全通关**（`game_cleared = true`）
+- **13/13 原版主线剧目全触发**（共 **64/64 句**原版主线与忆念剧本台词）
+- **7/7 多分支道心抉择全完成**（`branch_ch1_departure` .. `branch_ch7_final_stand`）
+- **9/9 九域【星海忆念】支线全收集**（`echo_n04_chanji` .. `echo_q08_shenxi`）
+- **9/9 九域开放世界全探索**（`n04`、`n01p1`、`n01p2`、`n08`、`n12p3`、`q04b`、`n10`、`q07`、`q08`）
+- **4/4 主角全员 Lv.60 + 4/4 星蕴终结技 + 3/3 偃甲合成 + 桃源仙居全操作 + 3/3 Boss 战全胜**
+
+| 排名 | 模型 (`Model`) | 模式 | 主线剧目 (`STORY_SCRIPTS`) | 分支抉择 (`STORY_BRANCHES`) | 星海忆念 (`SIDE_ECHOES`) | 九域探索 | 四主角 & 偃甲 & Boss | 工具步数 (`toolCalls`) | 推理轮数 (`calls/turn`) | 耗时 | 重放核验 (`SHA-256`) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| 🥇 **#1** | `agy-cli:deepseek-v4-reasoner` | `pure` | **13 / 13** (64 句) | **7 / 7** | **9 / 9** | **9 / 9** | 4主 Lv.60 · 偃甲 3/3 · 胜场 3/3 | **59 步** | 31 轮 (`1.90`/轮) | 315.8s | `✓ VERIFIED` (`a86550d8c7fb`) |
+| 🥈 **#2** | `agy-cli:gemini-4-argon-medium` | `pure` | **13 / 13** (64 句) | **7 / 7** | **9 / 9** | **9 / 9** | 4主 Lv.60 · 偃甲 3/3 · 胜场 3/3 | **64 步** | 38 轮 (`1.68`/轮) | 278.6s | `✓ VERIFIED` (`c89472df8954`) |
+| 🥉 **#3** | `agy-cli:glm-5-turbo` | `pure` | **13 / 13** (64 句) | **7 / 7** | **9 / 9** | **9 / 9** | 4主 Lv.60 · 偃甲 3/3 · 胜场 3/3 | **70 步** | 38 轮 (`1.84`/轮) | 351.2s | `✓ VERIFIED` (`8da162c0e67b`) |
+| **#4** | `agy-cli:qwen-4-max` | `pure` | **13 / 13** (64 句) | **7 / 7** | **9 / 9** | **9 / 9** | 4主 Lv.60 · 偃甲 3/3 · 胜场 3/3 | **75 步** | 42 轮 (`1.79`/轮) | 315.5s | `✓ VERIFIED` (`232c2c384677`) |
+| **#5** | `agy-cli:claude-opus-5-5-high` | `pure` | **13 / 13** (64 句) | **7 / 7** | **9 / 9** | **9 / 9** | 4主 Lv.60 · 偃甲 3/3 · 胜场 3/3 | **100 步** | 59 轮 (`1.69`/轮) | 259.5s | `✓ VERIFIED` (`443a203e1aa5`) |
+
+---
+
 ## 快速运行
 
 ```bash
-# 运行 15 步全流程无头基准测试（同时验证 normal 与 pure 盲测模式）
+# 1. 运行 15 步全流程无头基准测试（同时验证 normal 与 pure 盲测模式）
 npm test
 
-# 启动 JSON-Lines 交互式无头宿主
+# 2. 启动 pure 模式全剧情智能体闯关评测
+npm run bench:run -- --model claude-opus-5-5-high
+
+# 3. 对 bench/out/* 所有轨迹执行 SHA-256 确定性逐步重放核验
+npm run bench:verify
+
+# 4. 生成全剧情通关排行榜与 Web 交互式回放器 (web/board.html & web/replay.html)
+npm run bench:board
+
+# 5. 启动 JSON-Lines 交互式无头宿主
 npm run host
 npm run host:pure
 ```

@@ -10,6 +10,9 @@
     "test": "node ./test/run-headless-bench.mjs --mode normal && node ./test/run-headless-bench.mjs --mode pure",
     "test:headless": "node ./test/run-headless-bench.mjs --mode normal && node ./test/run-headless-bench.mjs --mode pure",
     "host": "node ./bin/agent-gujian2-host.mjs --mode normal",
-    "host:pure": "node ./bin/agent-gujian2-host.mjs --mode pure"
+    "host:pure": "node ./bin/agent-gujian2-host.mjs --mode pure",
+    "bench:run": "node ./bench/run-argon.mjs --mode pure",
+    "bench:verify": "node ./bench/verify.mjs",
+    "bench:board": "node ./bench/board.mjs"
   }
 }
