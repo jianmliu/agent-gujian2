@@ -552,7 +552,6 @@ else console.log((j.result?.content || []).map(c => c.text || '').join('\\n'));
     ].join("\n");
 
     const agyLog = path.join(outDir, `agy-s${session}.log`);
-    const cliModel = MODEL.startsWith("claude-") || MODEL.startsWith("gemini-") ? MODEL : "gemini-4-argon-medium";
     const agyArgs = [
       "-p",
       prompt,
@@ -563,7 +562,7 @@ else console.log((j.result?.content || []).map(c => c.text || '').join('\\n'));
       "--print-timeout",
       "600s",
       "--model",
-      cliModel,
+      MODEL,
       "--log-file",
       agyLog,
     ];
