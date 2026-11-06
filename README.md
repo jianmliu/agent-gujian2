@@ -64,3 +64,7 @@ npm run bench:board
 npm run host
 npm run host:pure
 ```
+
+## 双人共享世界原型
+
+在同一片古剑二地形中独立移动、互相可见，通过接触共享怪物触发一场原有规则驱动的战斗。服务器可从 SQLite 检查点恢复待决战斗。启动命令与双浏览器验收见 [共享世界原型](docs/shared-world-prototype.md)。
