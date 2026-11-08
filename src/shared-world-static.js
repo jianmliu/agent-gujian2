@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const pages = {
   '/': ['shared-world.html', 'text/html; charset=utf-8'],
   '/play3d': ['shared-world-3d.html', 'text/html; charset=utf-8'],
+  '/shared-world-network.js': ['shared-world-network.js', 'text/javascript; charset=utf-8'],
   '/shared-world-client.js': ['shared-world-client.js', 'text/javascript; charset=utf-8'],
   '/shared-world-3d.js': ['shared-world-3d.js', 'text/javascript; charset=utf-8'],
 };

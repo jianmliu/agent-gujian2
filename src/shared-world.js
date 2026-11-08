@@ -5,7 +5,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { Gujian2EngineCore } from './engine_core.js';
 
 const players = ['a', 'b'];
-const directions = { north: [0, -2], south: [0, 2], east: [2, 0], west: [-2, 0] };
+const directions = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] };
+export const SHARED_STEP_MS = 50;
+export const SHARED_INPUT_TTL_MS = 750;
+const speed = 4;
 const actions = new Set(['attack', 'heavy', 'guard']);
 const encounter = Object.freeze({
   boss_id: 'shared_trial', vip_monster: false, enemy_name: '荒野试炼怪',
@@ -58,13 +61,14 @@ function initialState(engine, arena) {
     x: arena.x + dx, z: arena.z, seq: 0, party: structuredClone(engine.party),
   });
   return {
-    version: 1, revision: 0, players: { a: newPlayer(-4), b: newPlayer(4) },
+    version: 2, simTick: 0, revision: 0, players: { a: newPlayer(-4), b: newPlayer(4) },
     monster: { status: 'available', starts: 0, settlements: 0 }, battle: null,
   };
 }
 
 function checkState(state, revision, arena) {
-  if (state?.version !== 1 || state.revision !== revision || !Number.isSafeInteger(revision) || revision < 0 ||
+  if (![1, 2].includes(state?.version) ||
+      (state.version === 2 && (!Number.isSafeInteger(state.simTick) || state.simTick < 0)) || state.revision !== revision || !Number.isSafeInteger(revision) || revision < 0 ||
       !players.every(id => {
         const p = state.players?.[id];
         return p && Number.isFinite(p.x) && Number.isFinite(p.z) &&
@@ -90,12 +94,14 @@ function nearestOnStep(target, from, to) {
   return Math.max(Math.min(from, to), Math.min(target, Math.max(from, to)));
 }
 
-export function openSharedWorld({ filename, assets, identityId }) {
+export function openSharedWorld({ filename, assets, identityId, now = () => performance.now() }) {
   const engine = assets.createEngine();
   const arena = arenaFor(engine);
   const initialCombat = structuredClone(engine.combat);
   const epoch = randomUUID();
   const configuration = digest(JSON.stringify([assets.assetId, identityId, arena, encounter]));
+  const inputs = new Map();
+  let lastAdvance = now(), unavailable = false;
   const db = new DatabaseSync(filename);
   try {
     db.exec(`
@@ -116,16 +122,17 @@ export function openSharedWorld({ filename, assets, identityId }) {
     if (row.configuration !== configuration) throw Error('shared-world checkpoint configuration mismatch');
     let state = JSON.parse(row.state);
     checkState(state, row.revision, arena);
+    if (state.version === 1) state = { ...state, version: 2, simTick: 0 };
     const update = db.prepare('UPDATE shared_world SET revision = ?, state = ? WHERE id = 1 AND revision = ? AND configuration = ?');
     const revision = db.prepare('SELECT revision FROM shared_world WHERE id = 1');
     const view = id => {
       const battle = state.battle?.owner === id ? state.battle : null;
       return {
-        epoch, revision: state.revision, self: id, arena,
+        epoch, revision: state.revision, simTick: state.simTick, simTimeMs: state.simTick * SHARED_STEP_MS, self: id, arena,
         nextSeq: state.players[id].seq + 1,
         players: Object.fromEntries(players.map(key => {
           const { x, z } = state.players[key];
-          return [key, { x, z, y: engine.physics.heightAt(x, z) }];
+          return [key, { x, z, y: engine.physics.heightAt(x, z), moving: !!inputs.get(key) && inputs.get(key).until > now() && state.battle?.owner !== key }];
         })),
         monster: { ...state.monster, x: arena.x, z: arena.z, y: engine.physics.heightAt(arena.x, arena.z), name: encounter.enemy_name },
         battle: battle && {
@@ -136,13 +143,29 @@ export function openSharedWorld({ filename, assets, identityId }) {
       };
     };
     const checkCurrent = () => {
-      if (revision.get().revision !== state.revision) throw Error('another host advanced the checkpoint');
+      if (unavailable) throw Error('shared world requires restart');
+      try {
+        if (revision.get().revision !== state.revision) throw Error('another host advanced the checkpoint');
+      } catch (error) { unavailable = true; throw error; }
     };
+    function commit(next) {
+      checkState(next, next.revision, arena);
+      try {
+        if (update.run(next.revision, JSON.stringify(next), state.revision, configuration).changes !== 1) {
+          throw Error('another host advanced the checkpoint');
+        }
+      } catch (error) {
+        unavailable = true;
+        throw error;
+      }
+      state = next;
+    }
 
     function move(next, id, direction) {
       if (next.battle?.owner === id) throw intentError('player is in battle');
       const player = next.players[id], [dx, dz] = directions[direction];
-      const x = player.x + dx, z = player.z + dz;
+      const distance = speed * SHARED_STEP_MS / 1000;
+      const x = player.x + dx * distance, z = player.z + dz * distance;
       if (Math.abs(x - arena.x) > arena.extent || Math.abs(z - arena.z) > arena.extent ||
           engine.physics.regionAt(x, z)?.name !== arena.region) return;
       const position = engine.physics.stepMovement(player.x, player.z, x, z);
@@ -171,8 +194,36 @@ export function openSharedWorld({ filename, assets, identityId }) {
       }
     }
 
+    function advance() {
+      try {
+        checkCurrent();
+        const time = now();
+        const elapsed = time - lastAdvance;
+        const steps = Math.min(5, Math.floor(elapsed / SHARED_STEP_MS));
+        if (!steps) return;
+        lastAdvance = time - elapsed % SHARED_STEP_MS;
+        for (let step = 0; step < steps; step++) {
+          const stepTime = lastAdvance - (steps - step - 1) * SHARED_STEP_MS;
+          const next = structuredClone(state);
+          const order = next.simTick % 2 ? [...players].reverse() : players;
+          for (const id of order) {
+            const input = inputs.get(id);
+            if (!input) continue;
+            if (input.until <= stepTime || next.battle?.owner === id) { inputs.delete(id); continue; }
+            if (input.since > stepTime) continue;
+            move(next, id, input.direction);
+            if (next.battle?.owner === id) inputs.delete(id);
+          }
+          next.simTick++;
+          next.revision++;
+          commit(next);
+        }
+      } catch (error) { unavailable = true; throw error; }
+    }
+
     return {
       read(id) { checkCurrent(); return view(id); },
+      advance,
       terrain() {
         checkCurrent();
         const radius = arena.extent + 16, spacing = 1, size = radius * 2 + 1;
@@ -190,18 +241,22 @@ export function openSharedWorld({ filename, assets, identityId }) {
         };
       },
       submit(id, input) {
+        checkCurrent();
         if (input.epoch !== epoch || input.seq !== state.players[id].seq + 1) throw intentError('stale intent');
+        advance();
         const next = structuredClone(state);
         // The detached candidate owns every engine field that prototype combat can modify.
-        if (input.type === 'move') move(next, id, input.direction);
-        else fight(next, id, input);
+        if (input.type === 'move' && state.battle?.owner === id) throw intentError('player is in battle');
+        if (input.type === 'combat') fight(next, id, input);
         next.players[id].seq++;
         next.revision++;
-        checkState(next, next.revision, arena);
-        if (update.run(next.revision, JSON.stringify(next), state.revision, configuration).changes !== 1) {
-          throw Error('another host advanced the checkpoint');
+        commit(next);
+        if (input.type === 'move') {
+          const time = now(), previous = inputs.get(id);
+          const since = previous?.direction === input.direction && previous.until > time ? previous.since : time;
+          inputs.set(id, { direction: input.direction, since, until: time + SHARED_INPUT_TTL_MS });
         }
-        state = next;
+        if (input.type === 'stop') inputs.delete(id);
         return view(id);
       },
       close() { db.close(); },
@@ -215,6 +270,7 @@ export function openSharedWorld({ filename, assets, identityId }) {
 export function validateSharedIntent(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.epoch !== 'string' ||
       !Number.isSafeInteger(input.seq) || input.seq < 1) return false;
+  if (input.type === 'stop') return Object.keys(input).length === 3;
   if (input.type === 'move') {
     return Object.keys(input).length === 4 && typeof input.direction === 'string' && Object.hasOwn(directions, input.direction);
   }

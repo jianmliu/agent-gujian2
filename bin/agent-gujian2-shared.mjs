@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { serveSharedFile } from '../src/shared-world-static.js';
-import { loadSharedAssets, openSharedWorld, validateSharedIntent } from '../src/shared-world.js';
+import { loadSharedAssets, openSharedWorld, validateSharedIntent, SHARED_STEP_MS } from '../src/shared-world.js';
 
 const { values } = parseArgs({ options: {
   port: { type: 'string', default: '8082' },
@@ -72,8 +72,15 @@ const server = createServer(async (req, res) => {
     return reply(res, 503, { error: 'shared world unavailable' });
   }
 });
-server.on('error', error => { world.close(); console.error(error.message); process.exitCode = 1; });
-server.listen(port, '127.0.0.1', () => console.log(JSON.stringify({ url: 'http://127.0.0.1:' + server.address().port })));
+let simulationTimer;
+server.on('error', error => { clearInterval(simulationTimer); world.close(); console.error(error.message); process.exitCode = 1; });
+server.listen(port, '127.0.0.1', () => {
+  simulationTimer = setInterval(() => {
+    try { world.advance(); }
+    catch (error) { clearInterval(simulationTimer); console.error(error.message); }
+  }, SHARED_STEP_MS);
+  console.log(JSON.stringify({ url: 'http://127.0.0.1:' + server.address().port }));
+});
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.once(signal, () => server.close(() => world.close()));
+  process.once(signal, () => { clearInterval(simulationTimer); server.close(() => world.close()); });
 }

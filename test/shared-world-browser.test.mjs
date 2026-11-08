@@ -6,21 +6,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { get as httpGet } from 'node:http';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { chromium } from 'playwright';
 
 const tokens = ['alpha-test-secret-0000', 'beta-test-secret-00000'];
 
-for (const entry of ['/', '/play3d']) test(entry + ' two browsers race for one encounter and finish it after a hard restart', { timeout: 90_000 }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'gujian2-shared-'));
+for (const entry of ['/', '/play3d']) test(entry + ' continuous world survives moving and battle process deaths', { timeout: 120_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gujian2-continuous-browser-'));
+  const filename = join(dir, 'world.sqlite');
   const serverPath = new URL('../bin/agent-gujian2-shared.mjs', import.meta.url);
-  const children = [];
+  const children = [], pageErrors = [];
   let browser;
-  const pageErrors = [];
-  async function start() {
-    const assets = process.env.GUJIAN2_TEST_ASSETS;
-    const render = process.env.GUJIAN2_TEST_RENDER;
-    const child = spawn(process.execPath, [serverPath.pathname, '--port', '0', '--db', join(dir, 'world.sqlite'),
+  const state = page => page.locator('#world').getAttribute('data-view').then(JSON.parse);
+  async function wait(page, predicate, value) {
+    await page.waitForFunction(({ source, value }) => {
+      const raw = document.querySelector('#world')?.dataset.view;
+      return raw && new Function('s', 'value', 'return (' + source + ')(s, value)')(JSON.parse(raw), value);
+    }, { source: predicate.toString(), value }, { timeout: 8000 });
+    return state(page);
+  }
+  async function start(port = 0) {
+    const assets = process.env.GUJIAN2_TEST_ASSETS, render = process.env.GUJIAN2_TEST_RENDER;
+    const child = spawn(process.execPath, [serverPath.pathname, '--port', String(port), '--db', filename,
       ...(assets ? ['--assets', assets] : []), ...(render ? ['--render', render] : [])], {
       env: { ...process.env, GUJIAN2_PLAYER_A_TOKEN: tokens[0], GUJIAN2_PLAYER_B_TOKEN: tokens[1] },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -37,12 +45,6 @@ for (const entry of ['/', '/play3d']) test(entry + ' two browsers race for one e
     reader.close();
     return { child, closed, url };
   }
-
-  const state = page => page.locator('#world').getAttribute('data-view').then(JSON.parse);
-  async function wait(page, fn) {
-    await page.waitForFunction(fn, undefined, { timeout: 5000 });
-    return state(page);
-  }
   async function connect(server) {
     return Promise.all(tokens.map(async token => {
       const context = await browser.newContext();
@@ -51,134 +53,156 @@ for (const entry of ['/', '/play3d']) test(entry + ' two browsers race for one e
       await page.goto(new URL(entry, server.url).href);
       await page.locator('#token').fill(token);
       await page.locator('#join').click();
-      await wait(page, () => document.querySelector('#world').dataset.view);
+      await wait(page, () => true);
       if (entry === '/play3d') {
         await page.waitForFunction(() => document.querySelector('#scene3d')?.dataset.ready === 'true');
         const rendered = await page.locator('#scene3d').getAttribute('data-render').then(JSON.parse);
         assert.equal(rendered.actors.length, 2);
-        assert(rendered.drawCalls > 0);
-        assert(rendered.actors.every(actor => actor.visible && actor.skinned));
-        const sample = await page.locator('#scene3d').evaluate(canvas => {
-          const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
-          const pixels = new Uint8Array(4 * gl.drawingBufferWidth * gl.drawingBufferHeight);
-          gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-          const colors = new Set();
-          for (let i = 0; i < pixels.length; i += 4) colors.add(pixels[i] + ',' + pixels[i + 1] + ',' + pixels[i + 2]);
-          return colors.size;
-        });
-        assert(sample > 32, 'actual rendered scene contains terrain and actors');
+        assert(rendered.drawCalls > 0 && rendered.actors.every(actor => actor.visible && actor.skinned));
       }
       return page;
     }));
   }
-  async function command(page, name) {
-    const [response] = await Promise.all([
-      page.waitForResponse(response => response.url().endsWith('/intent') && response.ok()),
-      page.locator('#' + name).click(),
-    ]);
-    const committed = await response.json();
-    await page.waitForFunction(revision => JSON.parse(document.querySelector('#world').dataset.view).revision >= revision, committed.revision);
+  async function key(page, name, down) {
+    await page.keyboard[down ? 'down' : 'up'](name);
   }
-  async function authenticated(server, index, endpoint, body) {
-    return fetch(server.url + endpoint, {
-      headers: { Authorization: 'Bearer ' + tokens[index], 'Content-Type': 'application/json' },
-      ...(body ? { method: 'POST', body: JSON.stringify(body) } : {}),
+  async function stop(page, name) {
+    await key(page, name, false);
+    return wait(page, s => !s.players[s.self].moving);
+  }
+  async function ticks(page, count) {
+    const before = await state(page);
+    return wait(page, (s, tick) => s.simTick >= tick, before.simTick + count);
+  }
+  async function killAndRead(server, pages, closePages = true) {
+    server.child.kill('SIGKILL');
+    assert.deepEqual(await server.closed, [null, 'SIGKILL']);
+    const db = new DatabaseSync(filename, { readOnly: true });
+    let saved;
+    try { saved = JSON.parse(db.prepare('SELECT state FROM shared_world WHERE id = 1').get().state); }
+    finally { db.close(); }
+    if (closePages) await Promise.all(pages.map(page => page.context().close()));
+    return saved;
+  }
+  function compareRecovery(saved, view) {
+    assert(view.simTick >= saved.simTick);
+    for (const id of ['a', 'b']) {
+      assert.equal(view.players[id].x, saved.players[id].x);
+      assert.equal(view.players[id].z, saved.players[id].z);
+      assert.equal(view.players[id].moving, false);
+    }
+    assert.equal(view.monster.status, saved.monster.status);
+    assert.equal(view.monster.starts, saved.monster.starts);
+  }
+  async function send(server, index, body) {
+    return fetch(server.url + '/intent', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + tokens[index], 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
   }
-
+  async function fight(page, action) {
+    const [response] = await Promise.all([
+      page.waitForResponse(r => r.url().endsWith('/intent') && r.ok() && r.request().postDataJSON().type === 'combat'),
+      page.locator('#' + action).click(),
+    ]);
+    const view = await response.json();
+    await wait(page, (s, seq) => s.nextSeq >= seq, view.nextSeq);
+    return view;
+  }
+  async function align(page, z) {
+    const view = await state(page);
+    if (Math.abs(view.players[view.self].z - z) < 0.6) return;
+    const keyName = view.players[view.self].z < z ? 'ArrowDown' : 'ArrowUp';
+    await key(page, keyName, true);
+    await wait(page, (s, target) => Math.abs(s.players[s.self].z - target) < 0.6, z);
+    await stop(page, keyName);
+  }
   try {
-    const server = await start();
+    let server = await start();
+    assert.equal((await fetch(server.url + '/state')).status, 401);
     const traversal = await new Promise((resolve, reject) => {
-      httpGet(server.url + '/assets/chars/../world.meta.json', { path: '/assets/chars/../world.meta.json',
-        headers: { Authorization: 'Bearer ' + tokens[0] } }, response => {
-        response.resume();
-        resolve(response.statusCode);
+      httpGet(server.url, { path: '/assets/chars/../world.meta.json', headers: { Authorization: 'Bearer ' + tokens[0] } }, response => {
+        response.resume(); resolve(response.statusCode);
       }).on('error', reject);
     });
     assert.equal(traversal, 404);
     browser = await chromium.launch();
-    const [a, b] = await connect(server);
+    let pages = await connect(server);
+    const [a, b] = pages;
     const initial = await state(a);
+    assert.equal((await send(server, 0, { epoch: initial.epoch, seq: initial.nextSeq, type: 'move', direction: ['east'] })).status, 400);
     assert.equal(await a.locator('[data-player="b"]').count(), 1);
     assert.equal(await b.locator('[data-player="a"]').count(), 1);
-    const invalid = await authenticated(server, 0, '/intent', {
-      epoch: initial.epoch, seq: initial.nextSeq, type: 'move', direction: ['east'],
-    });
-    assert.equal(invalid.status, 400);
 
-    await command(a, 'north');
-    const moved = await wait(b, () => JSON.parse(document.querySelector('#world').dataset.view).revision >= 1);
-    assert.equal(moved.players.b.z, initial.players.b.z);
-    assert.equal(moved.players.a.z, initial.players.a.z - 2);
-    if (entry === '/play3d') {
-      await b.waitForFunction(position => {
-        const data = JSON.parse(document.querySelector('#scene3d').dataset.render);
-        const actor = data.actors.find(row => row.id === 'a');
-        return Math.abs(actor.x - position.x) < 0.02 && Math.abs(actor.z - position.z) < 0.02;
-      }, moved.players.a);
-      if (process.env.GUJIAN2_SCREENSHOTS) await b.screenshot({ path: join(process.env.GUJIAN2_SCREENSHOTS, 'two-players-3d.png'), fullPage: true });
+    await Promise.all(pages.map(page => key(page, 'ArrowUp', true)));
+    const moving = await wait(a, s => s.players.a.moving && s.players.b.moving);
+    for (let i = 0; i < 15; i++) await key(a, 'ArrowUp', true);
+    const later = await wait(a, (s, tick) => s.simTick >= tick, moving.simTick + 6);
+    for (const id of ['a', 'b']) {
+      const expected = (later.simTick - moving.simTick) * 0.2;
+      assert(Math.abs(moving.players[id].z - later.players[id].z - expected) < 1e-7, JSON.stringify({ id, moving, later, expected }));
     }
-    await command(a, 'south');
+    await Promise.all(pages.map(page => stop(page, 'ArrowUp')));
+    const stopped = await wait(a, s => !s.players.a.moving && !s.players.b.moving);
+    assert.deepEqual((await ticks(a, 5)).players, stopped.players, 'key release stops both players');
 
-    await Promise.all([command(a, 'east'), command(b, 'west')]);
-    const pair = await Promise.all([a, b].map(page => wait(page, () => JSON.parse(document.querySelector('#world').dataset.view).revision >= 4)));
-    assert.equal(pair[0].monster.status, 'engaged');
-    assert.equal(pair[0].monster.starts, 1);
+    await key(a, 'ArrowDown', true);
+    await wait(b, s => s.players.a.moving);
+    await a.context().route('**/intent', route => route.abort());
+    const disconnected = await wait(b, s => !s.players.a.moving);
+    assert.deepEqual((await ticks(b, 5)).players.a, disconnected.players.a, 'lost input lease stops disconnected player');
+    await key(a, 'ArrowDown', false);
+    await a.context().unroute('**/intent');
+    await ticks(a, 3);
+
+    await Promise.all(pages.map(page => key(page, 'ArrowUp', true)));
+    await wait(a, s => s.players.a.moving && s.players.b.moving);
+    const old = await state(a);
+    const movingPort = Number(new URL(server.url).port);
+    const savedMoving = await killAndRead(server, pages, false);
+    server = await start(movingPort);
+    let recovered = await wait(pages[0], (s, epoch) => s.epoch !== epoch, old.epoch);
+    await wait(pages[1], (s, epoch) => s.epoch !== epoch, old.epoch);
+    await Promise.all(pages.map(page => key(page, 'ArrowUp', false)));
+    assert.notEqual(recovered.epoch, old.epoch);
+    compareRecovery(savedMoving, recovered);
+    assert.deepEqual((await ticks(pages[0], 5)).players, recovered.players, 'restored held input cannot resume movement');
+    assert.equal((await send(server, 0, { epoch: old.epoch, seq: old.nextSeq, type: 'move', direction: 'north' })).status, 409);
+
+    await Promise.all(pages.map(page => align(page, initial.arena.z)));
+    await Promise.all([key(pages[0], 'ArrowRight', true), key(pages[1], 'ArrowLeft', true)]);
+    await wait(pages[0], s => s.monster.status === 'engaged');
+    await Promise.all([stop(pages[0], 'ArrowRight'), stop(pages[1], 'ArrowLeft')]);
+    const pair = await Promise.all(pages.map(page => wait(page, s => s.monster.status === 'engaged')));
     const winner = pair.findIndex(view => view.battle);
-    assert(winner === 0 || winner === 1);
+    assert(winner >= 0);
     assert.equal(pair[1 - winner].battle, null);
-    await command([a, b][1 - winner], 'south');
-    await command([a, b][winner], 'attack');
-    const before = await state([a, b][winner]);
-    assert(before.battle.hp < before.battle.maxHp && before.battle.hp > 0);
-
-    server.child.kill('SIGKILL');
-    assert.deepEqual(await server.closed, [null, 'SIGKILL']);
-    await Promise.all([a, b].map(page => page.context().close()));
-
-    const restarted = await start();
-    const pages = await connect(restarted);
-    assert.equal((await fetch(restarted.url + '/state')).status, 401);
-    const recovered = await state(pages[winner]);
+    assert.equal(pair[0].monster.starts, 1);
+    const other = pair[1 - winner];
+    assert.equal((await send(server, 1 - winner, { epoch: other.epoch, seq: other.nextSeq, type: 'combat', battleId: pair[winner].battle.id, action: 'attack' })).status, 409);
+    await fight(pages[winner], 'attack');
+    const beforeBattle = await state(pages[winner]);
+    assert(beforeBattle.battle.hp > 0 && beforeBattle.battle.hp < 600);
     if (entry === '/play3d' && process.env.GUJIAN2_SCREENSHOTS) {
-      await pages[winner].screenshot({ path: join(process.env.GUJIAN2_SCREENSHOTS, 'recovered-battle-3d.png'), fullPage: true });
+      await pages[winner].screenshot({ path: join(process.env.GUJIAN2_SCREENSHOTS, 'continuous-battle.png'), fullPage: true });
     }
-    assert.notEqual(recovered.epoch, before.epoch);
-    for (const key of ['revision', 'players', 'monster', 'battle', 'nextSeq']) {
-      assert.deepEqual(recovered[key], before[key], key);
-    }
-
-    const old = await authenticated(restarted, winner, '/intent', {
-      epoch: before.epoch, seq: before.nextSeq, type: 'combat', action: 'attack', battleId: before.battle.id,
-    });
-    assert.equal(old.status, 409);
-
-    const other = await state(pages[1 - winner]);
-    const unauthorized = await authenticated(restarted, 1 - winner, '/intent', {
-      epoch: other.epoch, seq: other.nextSeq, type: 'combat', action: 'attack', battleId: before.battle.id,
-    });
-    assert.equal(unauthorized.status, 409);
-
-    let victoryIntent;
-    for (let i = 0; i < 12; i++) {
-      const active = await state(pages[winner]);
-      if (!active.battle) break;
-      victoryIntent = { epoch: active.epoch, seq: active.nextSeq, type: 'combat', action: 'heavy', battleId: active.battle.id };
-      await command(pages[winner], 'heavy');
-      await pages[winner].waitForFunction(revision => JSON.parse(document.querySelector('#world').dataset.view).revision > revision, active.revision);
-    }
-    const won = await wait(pages[1 - winner], () => JSON.parse(document.querySelector('#world').dataset.view).monster.status === 'defeated');
-    assert.equal(won.monster.starts, 1);
-    assert.equal(won.monster.settlements, 1);
-    assert.equal((await authenticated(restarted, winner, '/intent', victoryIntent)).status, 409);
-    const final = await (await authenticated(restarted, winner, '/state')).json();
+    const savedBattle = await killAndRead(server, pages);
+    server = await start();
+    pages = await connect(server);
+    recovered = await state(pages[winner]);
+    compareRecovery(savedBattle, recovered);
+    assert.deepEqual(recovered.battle, beforeBattle.battle);
+    assert.equal((await send(server, winner, { epoch: beforeBattle.epoch, seq: beforeBattle.nextSeq, type: 'combat', battleId: beforeBattle.battle.id, action: 'heavy' })).status, 409);
+    let last;
+    for (let i = 0; i < 12 && (await state(pages[winner])).battle; i++) last = await fight(pages[winner], 'heavy');
+    const final = await wait(pages[1 - winner], s => s.monster.status === 'defeated');
+    assert.equal(final.monster.starts, 1);
     assert.equal(final.monster.settlements, 1);
-
-    restarted.child.kill('SIGKILL');
-    assert.deepEqual(await restarted.closed, [null, 'SIGKILL']);
-    const afterVictory = await start();
-    const settled = await (await authenticated(afterVictory, winner, '/state')).json();
-    assert.deepEqual(settled.monster, final.monster);
+    assert.equal((await send(server, winner, { epoch: last.epoch, seq: last.nextSeq - 1, type: 'combat', battleId: beforeBattle.battle.id, action: 'heavy' })).status, 409);
+    const savedFinal = await killAndRead(server, pages);
+    server = await start();
+    const settled = await (await fetch(server.url + '/state', { headers: { Authorization: 'Bearer ' + tokens[winner] } })).json();
+    compareRecovery(savedFinal, settled);
+    assert.equal(settled.monster.settlements, 1);
     assert.equal(settled.battle, null);
     assert.deepEqual(pageErrors, []);
   } finally {

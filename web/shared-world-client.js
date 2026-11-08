@@ -3,7 +3,10 @@ const names = { a: '甲', b: '乙' };
 const movement = ['north', 'south', 'west', 'east'];
 const combat = ['attack', 'heavy', 'guard'];
 const keyboard = { ArrowUp: 'north', ArrowDown: 'south', ArrowLeft: 'west', ArrowRight: 'east' };
-let token, current, visual, busy = false, polling = false;
+let token, current, visual, busy = false, initializing = false, pendingView;
+let desiredDirection = null;
+const network = new Worker('/shared-world-network.js', { type: 'module' });
+const heldKeys = new Map();
 const svg = tag => document.createElementNS('http://www.w3.org/2000/svg', tag);
 
 function marker(x, z, label, color, player) {
@@ -21,7 +24,9 @@ function marker(x, z, label, color, player) {
 
 function render(view) {
   if (current?.epoch === view.epoch && current.revision > view.revision) return;
+  if (current && current.epoch !== view.epoch) { heldKeys.clear(); desiredDirection = null; }
   current = view;
+  if (view.battle && desiredDirection) setDirection(null);
   const { self, arena, monster, players, battle } = view;
   const markers = get('markers');
   if (markers) {
@@ -41,63 +46,98 @@ function render(view) {
   get('world').hidden = false;
 }
 
-async function request(path, body) {
-  const response = await fetch(path, {
-    headers: { Authorization: 'Bearer ' + token, ...(body && { 'Content-Type': 'application/json' }) },
-    ...(body && { method: 'POST', body: JSON.stringify(body) }),
-  });
-  const data = await response.json();
-  if (!response.ok) throw Error(data.error);
-  return data;
-}
-
-get('connect').onsubmit = async event => {
-  event.preventDefault();
-  if (busy || polling || current) return;
-  busy = true;
-  token = get('token').value;
+network.onmessage = async ({ data }) => {
+  if (data.type === 'error' || data.type === 'connect-error') {
+    heldKeys.clear();
+    desiredDirection = null;
+    get('notice').textContent = data.error;
+    if (data.type === 'connect-error') busy = false;
+    return;
+  }
+  if (data.type === 'view') {
+    if (initializing) pendingView = data.view;
+    else if (current) { render(data.view); get('notice').textContent = ''; }
+    return;
+  }
+  if (data.type !== 'connected') return;
+  initializing = true;
   try {
-    const view = await request('/state');
     if (get('scene3d') && !visual) {
       get('notice').textContent = '正在载入地形和角色…';
       const { createSharedScene } = await import('/shared-world-3d.js');
-      visual = await createSharedScene(get('scene3d'), view, await request('/terrain'));
+      visual = await createSharedScene(get('scene3d'), data.view, data.terrain);
     }
-    render(view);
+    render(pendingView ?? data.view);
     get('token').value = '';
     get('connect').hidden = true;
     get('notice').textContent = '';
   } catch (error) {
-    token = undefined;
     get('notice').textContent = error.message;
-  } finally { busy = false; }
+  } finally { busy = false; initializing = false; pendingView = undefined; }
 };
-async function submit(input) {
-  if (!current || busy) return;
+get('connect').onsubmit = event => {
+  event.preventDefault();
+  if (busy || current) return;
   busy = true;
-  try {
-    render(await request('/intent', { epoch: current.epoch, seq: current.nextSeq, ...input }));
-    get('notice').textContent = '';
-  } catch (error) {
-    get('notice').textContent = error.message;
-  } finally { busy = false; }
+  token = get('token').value;
+  network.postMessage({ type: 'connect', token, threeD: !!get('scene3d') });
+};
+function setDirection(direction) {
+  if (!current || desiredDirection === direction) return;
+  desiredDirection = direction;
+  network.postMessage({ type: 'direction', direction });
 }
 
-for (const direction of movement) get(direction).onclick = () => submit({ type: 'move', direction });
+function releaseInput() {
+  heldKeys.clear();
+  setDirection(null);
+}
+for (const direction of movement) {
+  const button = get(direction);
+  button.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    button.setPointerCapture(event.pointerId);
+    setDirection(direction);
+  });
+  button.addEventListener('pointerup', releaseInput);
+  button.addEventListener('pointercancel', releaseInput);
+  button.addEventListener('lostpointercapture', releaseInput);
+  button.addEventListener('click', event => {
+    // Keyboard activation of a movement button produces a short, bounded hold.
+    if (event.detail === 0) {
+      setDirection(direction);
+      setTimeout(() => { if (desiredDirection === direction) releaseInput(); }, 200);
+    }
+  });
+}
 for (const action of combat) get(action).onclick = () => {
-  if (current?.battle) submit({ type: 'combat', battleId: current.battle.id, action });
+  if (current?.battle) network.postMessage({ type: 'combat', action });
 };
 window.addEventListener('keydown', event => {
   const direction = keyboard[event.key];
   if (current && direction && !current.battle && event.target.tagName !== 'INPUT') {
     event.preventDefault();
-    get(direction).click();
+    if (heldKeys.has(event.key) || event.repeat) return;
+    heldKeys.set(event.key, direction);
+    setDirection(direction);
   }
 });
-setInterval(async () => {
-  if (!current || !token || busy || polling) return;
-  polling = true;
-  try { render(await request('/state')); }
-  catch (error) { get('notice').textContent = error.message; }
-  finally { polling = false; }
-}, 200);
+window.addEventListener('keyup', event => {
+  if (!heldKeys.delete(event.key)) return;
+  event.preventDefault();
+  setDirection([...heldKeys.values()].at(-1) ?? null);
+});
+window.addEventListener('blur', releaseInput);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseInput(); });
+window.addEventListener('pagehide', () => {
+  if (!current || !token) return;
+  heldKeys.clear();
+  desiredDirection = null;
+  network.postMessage({ type: 'direction', direction: null });
+  // Lease expiry also bounds movement when this best-effort release is lost.
+  void fetch('/intent', {
+    method: 'POST', keepalive: true,
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ epoch: current.epoch, seq: current.nextSeq, type: 'stop' }),
+  }).catch(() => {});
+});
