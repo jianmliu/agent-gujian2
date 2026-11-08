@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { serveSharedFile } from '../src/shared-world-static.js';
 import { loadSharedAssets, openSharedWorld, validateSharedIntent } from '../src/shared-world.js';
 
 const { values } = parseArgs({ options: {
   port: { type: 'string', default: '8082' },
   db: { type: 'string' },
+  render: { type: 'string' },
   assets: { type: 'string', default: fileURLToPath(new URL('../../Open-Gujian2/assets/', import.meta.url)) },
 } });
 const port = Number(values.port);
@@ -21,7 +23,7 @@ if (tokens.some(token => typeof token !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/
 }
 const hash = value => createHash('sha256').update(value).digest();
 const proofs = tokens.map(hash);
-const html = readFileSync(new URL('../web/shared-world.html', import.meta.url));
+const renderDirectory = values.render ?? resolve(values.assets, '../js');
 const world = openSharedWorld({
   filename: values.db, assets: loadSharedAssets(values.assets),
   identityId: hash(Buffer.concat(proofs)).toString('hex'),
@@ -49,10 +51,7 @@ const server = createServer(async (req, res) => {
   if (req.headers.host !== authority || (req.headers.origin && req.headers.origin !== 'http://' + authority)) {
     return reply(res, 403, { error: 'origin refused' });
   }
-  if (req.method === 'GET' && req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-    return res.end(html);
-  }
+  if (serveSharedFile(req, res, values.assets, renderDirectory)) return;
   const authorization = req.headers.authorization;
   const match = /^Bearer ([A-Za-z0-9_-]{16,128})$/.exec(authorization ?? '');
   const candidate = match && hash(match[1]);
@@ -60,6 +59,7 @@ const server = createServer(async (req, res) => {
   if (index < 0) return reply(res, 401, { error: 'player token required' });
   const id = ['a', 'b'][index];
   try {
+    if (req.method === 'GET' && req.url === '/terrain') return reply(res, 200, world.terrain());
     if (req.method === 'GET' && req.url === '/state') return reply(res, 200, world.read(id));
     if (req.method !== 'POST' || req.url !== '/intent') return reply(res, 404, { error: 'unknown endpoint' });
     if (req.headers['content-type'] !== 'application/json') return reply(res, 415, { error: 'JSON required' });

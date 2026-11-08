@@ -5,20 +5,23 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { get as httpGet } from 'node:http';
 import test from 'node:test';
 import { chromium } from 'playwright';
 
 const tokens = ['alpha-test-secret-0000', 'beta-test-secret-00000'];
 
-test('two browsers race for one encounter and finish it after a hard restart', { timeout: 60_000 }, async () => {
+for (const entry of ['/', '/play3d']) test(entry + ' two browsers race for one encounter and finish it after a hard restart', { timeout: 90_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gujian2-shared-'));
   const serverPath = new URL('../bin/agent-gujian2-shared.mjs', import.meta.url);
   const children = [];
   let browser;
+  const pageErrors = [];
   async function start() {
     const assets = process.env.GUJIAN2_TEST_ASSETS;
+    const render = process.env.GUJIAN2_TEST_RENDER;
     const child = spawn(process.execPath, [serverPath.pathname, '--port', '0', '--db', join(dir, 'world.sqlite'),
-      ...(assets ? ['--assets', assets] : [])], {
+      ...(assets ? ['--assets', assets] : []), ...(render ? ['--render', render] : [])], {
       env: { ...process.env, GUJIAN2_PLAYER_A_TOKEN: tokens[0], GUJIAN2_PLAYER_B_TOKEN: tokens[1] },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -44,10 +47,27 @@ test('two browsers race for one encounter and finish it after a hard restart', {
     return Promise.all(tokens.map(async token => {
       const context = await browser.newContext();
       const page = await context.newPage();
-      await page.goto(server.url);
+      page.on('pageerror', error => pageErrors.push(error.message));
+      await page.goto(new URL(entry, server.url).href);
       await page.locator('#token').fill(token);
       await page.locator('#join').click();
       await wait(page, () => document.querySelector('#world').dataset.view);
+      if (entry === '/play3d') {
+        await page.waitForFunction(() => document.querySelector('#scene3d')?.dataset.ready === 'true');
+        const rendered = await page.locator('#scene3d').getAttribute('data-render').then(JSON.parse);
+        assert.equal(rendered.actors.length, 2);
+        assert(rendered.drawCalls > 0);
+        assert(rendered.actors.every(actor => actor.visible && actor.skinned));
+        const sample = await page.locator('#scene3d').evaluate(canvas => {
+          const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+          const pixels = new Uint8Array(4 * gl.drawingBufferWidth * gl.drawingBufferHeight);
+          gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          const colors = new Set();
+          for (let i = 0; i < pixels.length; i += 4) colors.add(pixels[i] + ',' + pixels[i + 1] + ',' + pixels[i + 2]);
+          return colors.size;
+        });
+        assert(sample > 32, 'actual rendered scene contains terrain and actors');
+      }
       return page;
     }));
   }
@@ -68,6 +88,14 @@ test('two browsers race for one encounter and finish it after a hard restart', {
 
   try {
     const server = await start();
+    const traversal = await new Promise((resolve, reject) => {
+      httpGet(server.url + '/assets/chars/../world.meta.json', { path: '/assets/chars/../world.meta.json',
+        headers: { Authorization: 'Bearer ' + tokens[0] } }, response => {
+        response.resume();
+        resolve(response.statusCode);
+      }).on('error', reject);
+    });
+    assert.equal(traversal, 404);
     browser = await chromium.launch();
     const [a, b] = await connect(server);
     const initial = await state(a);
@@ -82,6 +110,14 @@ test('two browsers race for one encounter and finish it after a hard restart', {
     const moved = await wait(b, () => JSON.parse(document.querySelector('#world').dataset.view).revision >= 1);
     assert.equal(moved.players.b.z, initial.players.b.z);
     assert.equal(moved.players.a.z, initial.players.a.z - 2);
+    if (entry === '/play3d') {
+      await b.waitForFunction(position => {
+        const data = JSON.parse(document.querySelector('#scene3d').dataset.render);
+        const actor = data.actors.find(row => row.id === 'a');
+        return Math.abs(actor.x - position.x) < 0.02 && Math.abs(actor.z - position.z) < 0.02;
+      }, moved.players.a);
+      if (process.env.GUJIAN2_SCREENSHOTS) await b.screenshot({ path: join(process.env.GUJIAN2_SCREENSHOTS, 'two-players-3d.png'), fullPage: true });
+    }
     await command(a, 'south');
 
     await Promise.all([command(a, 'east'), command(b, 'west')]);
@@ -104,6 +140,9 @@ test('two browsers race for one encounter and finish it after a hard restart', {
     const pages = await connect(restarted);
     assert.equal((await fetch(restarted.url + '/state')).status, 401);
     const recovered = await state(pages[winner]);
+    if (entry === '/play3d' && process.env.GUJIAN2_SCREENSHOTS) {
+      await pages[winner].screenshot({ path: join(process.env.GUJIAN2_SCREENSHOTS, 'recovered-battle-3d.png'), fullPage: true });
+    }
     assert.notEqual(recovered.epoch, before.epoch);
     for (const key of ['revision', 'players', 'monster', 'battle', 'nextSeq']) {
       assert.deepEqual(recovered[key], before[key], key);
@@ -141,6 +180,7 @@ test('two browsers race for one encounter and finish it after a hard restart', {
     const settled = await (await authenticated(afterVictory, winner, '/state')).json();
     assert.deepEqual(settled.monster, final.monster);
     assert.equal(settled.battle, null);
+    assert.deepEqual(pageErrors, []);
   } finally {
     try { await browser?.close(); }
     finally {

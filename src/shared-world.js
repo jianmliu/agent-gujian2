@@ -125,9 +125,9 @@ export function openSharedWorld({ filename, assets, identityId }) {
         nextSeq: state.players[id].seq + 1,
         players: Object.fromEntries(players.map(key => {
           const { x, z } = state.players[key];
-          return [key, { x, z }];
+          return [key, { x, z, y: engine.physics.heightAt(x, z) }];
         })),
-        monster: { ...state.monster, x: arena.x, z: arena.z, name: encounter.enemy_name },
+        monster: { ...state.monster, x: arena.x, z: arena.z, y: engine.physics.heightAt(arena.x, arena.z), name: encounter.enemy_name },
         battle: battle && {
           id: battle.id, hp: battle.combat.enemy_hp, maxHp: battle.combat.enemy_max_hp,
           combo: battle.combat.combo_step, telegraph: battle.combat.telegraph_active,
@@ -173,6 +173,22 @@ export function openSharedWorld({ filename, assets, identityId }) {
 
     return {
       read(id) { checkCurrent(); return view(id); },
+      terrain() {
+        checkCurrent();
+        const radius = arena.extent + 16, spacing = 1, size = radius * 2 + 1;
+        const heights = [];
+        for (let z = -radius; z <= radius; z += spacing) {
+          for (let x = -radius; x <= radius; x += spacing) {
+            heights.push(engine.physics.terrainHeightAt(arena.x + x, arena.z + z));
+          }
+        }
+        const { originX, originZ, worldW, worldH } = engine.physics;
+        return {
+          arena, radius, spacing, size, heights, originX, originZ, worldW, worldH,
+          props: engine.physics.placedProps.filter(p => Math.abs(p.x - arena.x) < radius && Math.abs(p.z - arena.z) < radius)
+            .map(({ name, x, y, z, rot, scale }) => ({ name, x, y, z, rot, scale })),
+        };
+      },
       submit(id, input) {
         if (input.epoch !== epoch || input.seq !== state.players[id].seq + 1) throw intentError('stale intent');
         const next = structuredClone(state);

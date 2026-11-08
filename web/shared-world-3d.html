@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>古剑二 · 双人 3D 试炼</title>
+<style>
+  body { margin: 1rem auto; padding: 0 1rem; max-width: 68rem; background: #172320; color: #f4eee1; font: 1rem system-ui; }
+  canvas { display: block; width: 100%; height: 36rem; max-height: 58vh; background: #273d32; border: 1px solid #698873; border-radius: .5rem; }
+  button, input { padding: .45rem .7rem; margin: .25rem; font: inherit; }
+  h1 { font-size: 1.6rem; margin: .5rem 0; }
+  #notice { min-height: 1.5em; }
+</style>
+<h1>古剑二 · 双人 3D 试炼</h1>
+<p><a href="/" style="color:#f5d278">轻量地图</a></p>
+<form id="connect">
+  <label>玩家凭据 <input id="token" type="password" autocomplete="off" required></label>
+  <button id="join">进入</button>
+</form>
+<p id="notice" role="status"></p>
+<p>方向键移动 · 鼠标拖动旋转视角 · 滚轮缩放</p>
+<main id="world" hidden>
+  <p id="identity"></p>
+  <canvas id="scene3d" aria-label="双人 3D 试炼场"></canvas>
+  <div id="roster" aria-label="场景中的玩家"></div>
+  <p id="monster"></p>
+  <section aria-label="移动">
+    <button id="north">北 ↑</button><button id="south">南 ↓</button>
+    <button id="west">西 ←</button><button id="east">东 →</button>
+  </section>
+  <section id="battle" aria-label="战斗" hidden>
+    <p id="battle-info"></p>
+    <button id="attack">轻击</button><button id="heavy">重击</button>
+    <button id="guard">格挡</button>
+  </section>
+</main>
+<script type="importmap">{"imports":{"three":"/render/three.module.js"}}</script>
+<script type="module" src="/shared-world-client.js"></script>
+</html>
