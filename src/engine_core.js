@@ -2055,7 +2055,7 @@ export class Gujian2EngineCore {
     // 1. 闪避翻滚（赋予 0.45s 无敌帧 iframe，规避 Boss 红圈 AOE 预警并触发完美闪避反击加成）
     if (action === 'dodge') {
       this.combat.iframe_timer = 0.45;
-      if (this.combat.telegraph_active) {
+      if (this.combat.telegraph_active && !opts.deferEnemyAttack) {
         this.combat.telegraph_active = false;
         this.combat.dodges_succeeded++;
         leader.morale = Math.min(100, leader.morale + 35);
@@ -2170,45 +2170,62 @@ export class Gujian2EngineCore {
 
     // 若敌方存活，敌方反击 & 阿阮同伴 AI 自动释放【春风化雨】恢复全队
     if (this.combat.enemy_hp > 0) {
-      if (this.combat.telegraph_active && this.combat.iframe_timer <= 0 && !this.combat.guard_active) {
-        // 受到 Boss AOE 伤害
-        for (const m of this.party) {
-          if (m.in_team) m.hp = Math.max(40, m.hp - 35);
-        }
-        this.combat.telegraph_active = false;
-      } else {
-        // 普通反击伤害
-        leader.hp = Math.max(50, leader.hp - 18);
-        // 下一轮概率再次亮起红圈预警
-        if (this.combat.enemy_hp < this.combat.enemy_max_hp * 0.65) {
-          this.combat.telegraph_active = true;
-        }
-      }
-
-      // 阿阮在队时自动触发同伴 AI【春风化雨】群体治疗
-      const aruan = this.party[3];
-      if (aruan && aruan.in_team) {
-        const needHeal = this.party.some((m) => m.in_team && m.hp < m.max_hp);
-        if (needHeal) {
-          for (const m of this.party) {
-            if (m.in_team) m.hp = Math.min(m.max_hp, m.hp + 45);
-          }
-          this.combat.companion_heals++;
-          log += ' 阿阮同伴 AI 自动吹奏巴乌施展【春风化雨】为全队恢复气血！';
-        }
-      }
+      if (!opts.deferEnemyAttack) log += this.resolveEnemyAttack();
     } else {
       // 击败 Boss 结算
       this._onBossDefeated(this.combat.boss_id);
       log += ` 成功击败【${this.combat.enemy_name}】！`;
     }
 
-    this.combat.guard_active = false;
+    if (!opts.deferEnemyAttack) this.combat.guard_active = false;
     this.combat.last_combat_log = log;
     return this.observe({
       event: this.combat.active ? `combat_hit:${action}` : `combat_victory:${this.combat.boss_id}`,
       damage_dealt: totalTurnDmg,
     });
+  }
+
+  // Shared simulation invokes this at its persisted deadline; legacy calls it per action.
+  resolveEnemyAttack({ timed = false } = {}) {
+    const leader = this.party[this.leaderIdx] || this.party[0];
+    let log = '';
+    if (timed && (this.combat.iframe_timer > 0 || this.combat.guard_active)) {
+      if (this.combat.iframe_timer > 0) {
+        this.combat.dodges_succeeded++;
+        leader.morale = Math.min(100, leader.morale + 35);
+        log = '闪避成功，躲过怪物扑击！';
+      } else log = '格挡成功，挡下怪物扑击！';
+      this.combat.guard_active = false;
+      return log;
+    }
+    if (this.combat.telegraph_active && this.combat.iframe_timer <= 0 && !this.combat.guard_active) {
+      // 受到 Boss AOE 伤害
+      for (const m of this.party) {
+        if (m.in_team) m.hp = Math.max(40, m.hp - 35);
+      }
+      this.combat.telegraph_active = false;
+    } else {
+      // 普通反击伤害
+      leader.hp = Math.max(50, leader.hp - 18);
+      // 下一轮概率再次亮起红圈预警
+      if (this.combat.enemy_hp < this.combat.enemy_max_hp * 0.65) {
+        this.combat.telegraph_active = true;
+      }
+    }
+
+    // 阿阮在队时自动触发同伴 AI【春风化雨】群体治疗
+    const aruan = this.party[3];
+    if (aruan && aruan.in_team) {
+      const needHeal = this.party.some((m) => m.in_team && m.hp < m.max_hp);
+      if (needHeal) {
+        for (const m of this.party) {
+          if (m.in_team) m.hp = Math.min(m.max_hp, m.hp + 45);
+        }
+        this.combat.companion_heals++;
+        log += ' 阿阮同伴 AI 自动吹奏巴乌施展【春风化雨】为全队恢复气血！';
+      }
+    }
+    return log || (timed ? '怪物扑击命中！' : '');
   }
 
   _onBossDefeated(bossId) {
@@ -2525,7 +2542,8 @@ export class Gujian2EngineCore {
       case 'home_action':
         return this.homeAction(cmdPayload.action || 'all', cmdPayload.item || '');
       case 'combat_action':
-        return this.combatAction(cmdPayload.action || 'attack', cmdPayload);
+        // Timing deferral belongs to the shared host, never to protocol callers.
+        return this.combatAction(cmdPayload.action || 'attack');
       case 'save_checkpoint':
         return this.saveCheckpoint(cmdPayload.slot || 'default');
       case 'load_checkpoint':

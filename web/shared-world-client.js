@@ -1,7 +1,7 @@
 const get = id => document.getElementById(id);
 const names = { a: '甲', b: '乙' };
 const movement = ['north', 'south', 'west', 'east'];
-const combat = ['attack', 'heavy', 'guard'];
+const combat = ['attack', 'heavy', 'guard', 'dodge'];
 const keyboard = { ArrowUp: 'north', ArrowDown: 'south', ArrowLeft: 'west', ArrowRight: 'east' };
 let token, current, visual, busy = false, initializing = false, pendingView;
 let desiredDirection = null;
@@ -40,7 +40,8 @@ function render(view) {
     ({ available: '可接触', engaged: '战斗中', defeated: '已击败' })[monster.status];
   get('battle').hidden = !battle;
   get('battle-info').textContent = battle ?
-    '怪物 ' + battle.hp + '/' + battle.maxHp + ' · 队伍气血 ' + battle.partyHp + (battle.log ? ' · ' + battle.log : '') : '';
+    '怪物 ' + battle.hp + '/' + battle.maxHp + ' · 队伍气血 ' + battle.partyHp + ' · ' + (battle.phase === 'warning' ? '扑击预警 ' : '怪物恢复 ') + battle.phaseRemainingMs + 'ms · 闪避 ' + battle.iframeRemainingMs + 'ms' + (battle.log ? ' · ' + battle.log : '') : '';
+  for (const action of combat) get(action).disabled = !battle || battle.actionRemainingMs > 0 || (['dodge', 'guard'].includes(action) && battle.defenseRemainingMs > 0);
   for (const id of movement) get(id).disabled = !!battle;
   get('world').dataset.view = JSON.stringify(view);
   get('world').hidden = false;
