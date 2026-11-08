@@ -3,13 +3,14 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Gujian2EngineCore } from './engine_core.js';
+import { createBattleClock, validBattleClock, syncBattleClock, advanceBattleClock, performTimedAction } from './shared-battle-clock.js';
 
 const players = ['a', 'b'];
 const directions = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] };
 export const SHARED_STEP_MS = 50;
 export const SHARED_INPUT_TTL_MS = 750;
 const speed = 4;
-const actions = new Set(['attack', 'heavy', 'guard']);
+const actions = new Set(['attack', 'heavy', 'guard', 'dodge']);
 const encounter = Object.freeze({
   boss_id: 'shared_trial', vip_monster: false, enemy_name: '荒野试炼怪',
   hp: 600, shield: 0, telegraph_name: '野兽扑击',
@@ -61,14 +62,14 @@ function initialState(engine, arena) {
     x: arena.x + dx, z: arena.z, seq: 0, party: structuredClone(engine.party),
   });
   return {
-    version: 2, simTick: 0, revision: 0, players: { a: newPlayer(-4), b: newPlayer(4) },
+    version: 3, simTick: 0, revision: 0, players: { a: newPlayer(-4), b: newPlayer(4) },
     monster: { status: 'available', starts: 0, settlements: 0 }, battle: null,
   };
 }
 
 function checkState(state, revision, arena) {
-  if (![1, 2].includes(state?.version) ||
-      (state.version === 2 && (!Number.isSafeInteger(state.simTick) || state.simTick < 0)) || state.revision !== revision || !Number.isSafeInteger(revision) || revision < 0 ||
+  if (![1, 2, 3].includes(state?.version) ||
+      (state.version >= 2 && (!Number.isSafeInteger(state.simTick) || state.simTick < 0)) || state.revision !== revision || !Number.isSafeInteger(revision) || revision < 0 ||
       !players.every(id => {
         const p = state.players?.[id];
         return p && Number.isFinite(p.x) && Number.isFinite(p.z) &&
@@ -82,7 +83,8 @@ function checkState(state, revision, arena) {
       battle?.id === encounter.boss_id && players.includes(battle.owner) &&
       battle.combat?.active === true && battle.combat.boss_id === encounter.boss_id &&
       battle.combat.enemy_max_hp === encounter.hp && Number.isFinite(battle.combat.enemy_hp) &&
-      battle.combat.enemy_hp > 0 && battle.combat.enemy_hp <= encounter.hp) return;
+      battle.combat.enemy_hp > 0 && battle.combat.enemy_hp <= encounter.hp &&
+      (state.version < 3 || validBattleClock(battle.clock, state.simTick))) return;
   throw Error('invalid shared-world encounter checkpoint');
 }
 
@@ -122,7 +124,14 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
     if (row.configuration !== configuration) throw Error('shared-world checkpoint configuration mismatch');
     let state = JSON.parse(row.state);
     checkState(state, row.revision, arena);
-    if (state.version === 1) state = { ...state, version: 2, simTick: 0 };
+    if (state.version < 3) {
+      if (state.version === 1) state.simTick = 0;
+      if (state.battle) {
+        state.battle.clock = createBattleClock(state.simTick, state.battle.combat.telegraph_active);
+        syncBattleClock(state.battle, state.simTick);
+      }
+      state.version = 3;
+    }
     const update = db.prepare('UPDATE shared_world SET revision = ?, state = ? WHERE id = 1 AND revision = ? AND configuration = ?');
     const revision = db.prepare('SELECT revision FROM shared_world WHERE id = 1');
     const view = id => {
@@ -138,6 +147,14 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
         battle: battle && {
           id: battle.id, hp: battle.combat.enemy_hp, maxHp: battle.combat.enemy_max_hp,
           combo: battle.combat.combo_step, telegraph: battle.combat.telegraph_active,
+          phase: battle.clock.phase, phaseUntilTick: battle.clock.phaseUntil,
+          phaseRemainingMs: (battle.clock.phaseUntil - state.simTick) * SHARED_STEP_MS,
+          iframeUntilTick: battle.clock.iframeUntil,
+          iframeRemainingMs: Math.max(0, battle.clock.iframeUntil - state.simTick) * SHARED_STEP_MS,
+          guardRemainingMs: Math.max(0, battle.clock.guardUntil - state.simTick) * SHARED_STEP_MS,
+          actionRemainingMs: Math.max(0, battle.clock.actionUntil - state.simTick) * SHARED_STEP_MS,
+          defenseRemainingMs: Math.max(0, battle.clock.defenseUntil - state.simTick) * SHARED_STEP_MS,
+          strikes: battle.clock.strikes, dodges: battle.combat.dodges_succeeded,
           partyHp: state.players[id].party[0].hp, log: battle.combat.last_combat_log,
         },
       };
@@ -178,16 +195,14 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
       engine.party = player.party;
       engine.combat = structuredClone(initialCombat);
       engine._startCombat(encounter);
-      next.battle = { id: encounter.boss_id, owner: id, combat: structuredClone(engine.combat) };
+      next.battle = { id: encounter.boss_id, owner: id, combat: structuredClone(engine.combat), clock: createBattleClock(next.simTick + 1) };
       next.monster = { status: 'engaged', starts: 1, settlements: 0 };
     }
 
     function fight(next, id, input) {
       const battle = next.battle;
       if (!battle || battle.id !== input.battleId || battle.owner !== id) throw intentError('battle offer is unavailable');
-      engine.party = next.players[id].party;
-      engine.combat = battle.combat;
-      engine.combatAction(input.action);
+      performTimedAction(engine, battle, next.players[id].party, input.action, next.simTick);
       if (!battle.combat.active) {
         next.battle = null;
         next.monster = { status: 'defeated', starts: 1, settlements: 1 };
@@ -205,6 +220,7 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
         for (let step = 0; step < steps; step++) {
           const stepTime = lastAdvance - (steps - step - 1) * SHARED_STEP_MS;
           const next = structuredClone(state);
+          if (next.battle) advanceBattleClock(engine, next.battle, next.players[next.battle.owner].party, next.simTick + 1);
           const order = next.simTick % 2 ? [...players].reverse() : players;
           for (const id of order) {
             const input = inputs.get(id);

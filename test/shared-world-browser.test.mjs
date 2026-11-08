@@ -180,17 +180,31 @@ for (const entry of ['/', '/play3d']) test(entry + ' continuous world survives m
     const other = pair[1 - winner];
     assert.equal((await send(server, 1 - winner, { epoch: other.epoch, seq: other.nextSeq, type: 'combat', battleId: pair[winner].battle.id, action: 'attack' })).status, 409);
     await fight(pages[winner], 'attack');
-    const beforeBattle = await state(pages[winner]);
+    const exploring = await state(pages[1 - winner]);
+    await key(pages[1 - winner], 'ArrowUp', true);
+    await ticks(pages[1 - winner], 4);
+    await stop(pages[1 - winner], 'ArrowUp');
+    assert((await state(pages[1 - winner])).players[exploring.self].z < exploring.players[exploring.self].z);
+    const beforeBattle = await fight(pages[winner], 'dodge');
+    assert(beforeBattle.battle.iframeRemainingMs > 0);
+    const repeat = await send(server, winner, { epoch: beforeBattle.epoch, seq: beforeBattle.nextSeq - 1, type: 'combat', battleId: beforeBattle.battle.id, action: 'dodge' });
+    assert.equal(repeat.status, 409);
     assert(beforeBattle.battle.hp > 0 && beforeBattle.battle.hp < 600);
-    if (entry === '/play3d' && process.env.GUJIAN2_SCREENSHOTS) {
-      await pages[winner].screenshot({ path: join(process.env.GUJIAN2_SCREENSHOTS, 'continuous-battle.png'), fullPage: true });
-    }
     const savedBattle = await killAndRead(server, pages);
+    assert(savedBattle.battle.clock.iframeUntil > savedBattle.simTick, 'crash occurred inside live dodge');
     server = await start();
+    const bootView = await (await fetch(server.url + '/state', { headers: { Authorization: 'Bearer ' + tokens[winner] } })).json();
+    assert.equal(bootView.battle.iframeUntilTick, savedBattle.battle.clock.iframeUntil);
+    assert(bootView.battle.strikes >= savedBattle.battle.clock.strikes);
     pages = await connect(server);
     recovered = await state(pages[winner]);
     compareRecovery(savedBattle, recovered);
-    assert.deepEqual(recovered.battle, beforeBattle.battle);
+    assert.equal(recovered.battle.hp, beforeBattle.battle.hp);
+    assert.equal(recovered.battle.iframeUntilTick, beforeBattle.battle.iframeUntilTick);
+    await wait(pages[winner], s => s.battle.iframeRemainingMs === 0);
+    if (entry === '/play3d' && process.env.GUJIAN2_SCREENSHOTS) {
+      await pages[winner].screenshot({ path: join(process.env.GUJIAN2_SCREENSHOTS, 'battle-clock.png'), fullPage: true });
+    }
     assert.equal((await send(server, winner, { epoch: beforeBattle.epoch, seq: beforeBattle.nextSeq, type: 'combat', battleId: beforeBattle.battle.id, action: 'heavy' })).status, 409);
     let last;
     for (let i = 0; i < 12 && (await state(pages[winner])).battle; i++) last = await fight(pages[winner], 'heavy');
