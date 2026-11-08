@@ -12,4 +12,6 @@
 - [x] 4. 修改 `web/shared-world-client.js` 和 `web/shared-world-3d.js` 遍历公开 monsters，分别显示和隐藏每只怪，面板标明私有战斗目标。网络请求仍使用私有 battle.id。
 - [x] 5. 扩展 `test/shared-world-browser.test.mjs` 两个入口的实玩路线，保持原移动/断线/时钟覆盖，增加第二场、独立目标、双场 SIGKILL 与各一次结算。增加迁移、损坏关联和同时攻击失败回滚测试。
 - [x] 6. `npm run test:shared` 与 `npm test` 统一验收；独立代码复核，修复有效发现后重新验证受影响范围。日志和截图写入本机批次目录。更新 `docs/shared-world-prototype.md` 与计划状态。
-- [ ] 7. 提交当前分支、创建并附加 PR，确认 OPEN 且未合并，报告测试和实际边界。
+- [x] 7. 提交当前分支、创建并附加 PR，确认 OPEN 且未合并，报告测试和实际边界。
+
+已提交 [PR #5](https://github.com/jianmliu/agent-gujian2/pull/5)，保持未合并。统一验收共享 35/35，normal/pure 各15/15。
