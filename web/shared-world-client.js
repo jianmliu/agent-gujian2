@@ -27,20 +27,24 @@ function render(view) {
   if (current && current.epoch !== view.epoch) { heldKeys.clear(); desiredDirection = null; }
   current = view;
   if (view.battle && desiredDirection) setDirection(null);
-  const { self, arena, monster, players, battle } = view;
+  const { self, arena, monsters, players, battle } = view;
   const markers = get('markers');
   if (markers) {
     markers.replaceChildren(...Object.entries(players).map(([id, p]) =>
       marker(p.x - arena.x, p.z - arena.z, names[id], id === self ? '#6ad6f0' : '#f5d278', id)));
-    markers.append(marker(0, 0, '怪', monster.status === 'defeated' ? '#9e9e9e' : '#ee947c'));
+    for (const monster of Object.values(monsters)) {
+      const item = marker(monster.x - arena.x, monster.z - arena.z, monster.name, monster.status === 'defeated' ? '#9e9e9e' : '#ee947c');
+      item.dataset.monster = monster.id;
+      markers.append(item);
+    }
   }
   visual?.update(view);
   get('identity').textContent = '玩家' + names[self] + ' · ' + arena.region;
-  get('monster').textContent = monster.name + ' · ' +
-    ({ available: '可接触', engaged: '战斗中', defeated: '已击败' })[monster.status];
+  get('monster').textContent = Object.values(monsters).map(monster => monster.name + ' · ' +
+    ({ available: '可接触', engaged: '战斗中', defeated: '已击败' })[monster.status]).join(' ｜ ');
   get('battle').hidden = !battle;
   get('battle-info').textContent = battle ?
-    '怪物 ' + battle.hp + '/' + battle.maxHp + ' · 队伍气血 ' + battle.partyHp + ' · ' + (battle.phase === 'warning' ? '扑击预警 ' : '怪物恢复 ') + battle.phaseRemainingMs + 'ms · 闪避 ' + battle.iframeRemainingMs + 'ms' + (battle.log ? ' · ' + battle.log : '') : '';
+    battle.name + ' ' + battle.hp + '/' + battle.maxHp + ' · 队伍气血 ' + battle.partyHp + ' · ' + (battle.phase === 'warning' ? '扑击预警 ' : '怪物恢复 ') + battle.phaseRemainingMs + 'ms · 闪避 ' + battle.iframeRemainingMs + 'ms' + (battle.log ? ' · ' + battle.log : '') : '';
   for (const action of combat) get(action).disabled = !battle || battle.actionRemainingMs > 0 || (['dodge', 'guard'].includes(action) && battle.defenseRemainingMs > 0);
   for (const id of movement) get(id).disabled = !!battle;
   get('world').dataset.view = JSON.stringify(view);

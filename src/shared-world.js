@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Gujian2EngineCore } from './engine_core.js';
-import { createBattleClock, validBattleClock, syncBattleClock, advanceBattleClock, performTimedAction } from './shared-battle-clock.js';
+import { createBattleClock, validBattleClock, advanceBattleClock, performTimedAction } from './shared-battle-clock.js';
+
+import { sharedEncounter as encounter, battleFor, freshMonster, encounterCatalogue, migrateEncounters, checkEncounters, contactFraction } from './shared-encounters.js';
 
 const players = ['a', 'b'];
 const directions = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] };
@@ -11,10 +13,6 @@ export const SHARED_STEP_MS = 50;
 export const SHARED_INPUT_TTL_MS = 750;
 const speed = 4;
 const actions = new Set(['attack', 'heavy', 'guard', 'dodge']);
-const encounter = Object.freeze({
-  boss_id: 'shared_trial', vip_monster: false, enemy_name: '荒野试炼怪',
-  hp: 600, shield: 0, telegraph_name: '野兽扑击',
-});
 const digest = data => createHash('sha256').update(data).digest('hex');
 
 export function loadSharedAssets(directory) {
@@ -62,13 +60,13 @@ function initialState(engine, arena) {
     x: arena.x + dx, z: arena.z, seq: 0, party: structuredClone(engine.party),
   });
   return {
-    version: 3, simTick: 0, revision: 0, players: { a: newPlayer(-4), b: newPlayer(4) },
-    monster: { status: 'available', starts: 0, settlements: 0 }, battle: null,
+    version: 4, simTick: 0, revision: 0, players: { a: newPlayer(-4), b: newPlayer(4) },
+    monsters: { 'trial-1': freshMonster(), 'trial-2': freshMonster() }, battles: {},
   };
 }
 
-function checkState(state, revision, arena) {
-  if (![1, 2, 3].includes(state?.version) ||
+function checkState(state, revision, arena, catalogue) {
+  if (![1, 2, 3, 4].includes(state?.version) ||
       (state.version >= 2 && (!Number.isSafeInteger(state.simTick) || state.simTick < 0)) || state.revision !== revision || !Number.isSafeInteger(revision) || revision < 0 ||
       !players.every(id => {
         const p = state.players?.[id];
@@ -76,6 +74,7 @@ function checkState(state, revision, arena) {
           Math.abs(p.x - arena.x) <= arena.extent && Math.abs(p.z - arena.z) <= arena.extent &&
           Number.isSafeInteger(p.seq) && p.seq >= 0 && p.seq <= revision && Array.isArray(p.party) && p.party.length === 4;
       })) throw Error('invalid shared-world checkpoint');
+  if (state.version === 4) return checkEncounters(state, catalogue);
   const { monster, battle } = state;
   if (monster?.status === 'available' && monster.starts === 0 && monster.settlements === 0 && battle === null) return;
   if (monster?.status === 'defeated' && monster.starts === 1 && monster.settlements === 1 && battle === null) return;
@@ -92,13 +91,11 @@ function intentError(message) {
   return Object.assign(Error(message), { status: 409 });
 }
 
-function nearestOnStep(target, from, to) {
-  return Math.max(Math.min(from, to), Math.min(target, Math.max(from, to)));
-}
-
 export function openSharedWorld({ filename, assets, identityId, now = () => performance.now() }) {
   const engine = assets.createEngine();
   const arena = arenaFor(engine);
+  const catalogue = encounterCatalogue(engine, arena);
+  const battleEngines = Object.fromEntries(players.map(id => [id, assets.createEngine()]));
   const initialCombat = structuredClone(engine.combat);
   const epoch = randomUUID();
   const configuration = digest(JSON.stringify([assets.assetId, identityId, arena, encounter]));
@@ -123,29 +120,33 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
     const row = read.get();
     if (row.configuration !== configuration) throw Error('shared-world checkpoint configuration mismatch');
     let state = JSON.parse(row.state);
-    checkState(state, row.revision, arena);
-    if (state.version < 3) {
-      if (state.version === 1) state.simTick = 0;
-      if (state.battle) {
-        state.battle.clock = createBattleClock(state.simTick, state.battle.combat.telegraph_active);
-        syncBattleClock(state.battle, state.simTick);
-      }
-      state.version = 3;
-    }
+    checkState(state, row.revision, arena, catalogue);
     const update = db.prepare('UPDATE shared_world SET revision = ?, state = ? WHERE id = 1 AND revision = ? AND configuration = ?');
+    if (state.version < 4) {
+      const migrated = migrateEncounters(state);
+      migrated.revision++;
+      checkState(migrated, migrated.revision, arena, catalogue);
+      if (update.run(migrated.revision, JSON.stringify(migrated), state.revision, configuration).changes !== 1) {
+        throw Error('another host advanced the checkpoint');
+      }
+      state = migrated;
+    }
     const revision = db.prepare('SELECT revision FROM shared_world WHERE id = 1');
     const view = id => {
-      const battle = state.battle?.owner === id ? state.battle : null;
+      const battle = battleFor(state, id);
       return {
         epoch, revision: state.revision, simTick: state.simTick, simTimeMs: state.simTick * SHARED_STEP_MS, self: id, arena,
         nextSeq: state.players[id].seq + 1,
         players: Object.fromEntries(players.map(key => {
           const { x, z } = state.players[key];
-          return [key, { x, z, y: engine.physics.heightAt(x, z), moving: !!inputs.get(key) && inputs.get(key).until > now() && state.battle?.owner !== key }];
+          return [key, { x, z, y: engine.physics.heightAt(x, z), moving: !!inputs.get(key) && inputs.get(key).until > now() && !battleFor(state, key) }];
         })),
-        monster: { ...state.monster, x: arena.x, z: arena.z, y: engine.physics.heightAt(arena.x, arena.z), name: encounter.enemy_name },
-        battle: battle && {
-          id: battle.id, hp: battle.combat.enemy_hp, maxHp: battle.combat.enemy_max_hp,
+        monsters: Object.fromEntries(Object.entries(catalogue).map(([key, definition]) => {
+          const { status, starts, settlements } = state.monsters[key];
+          return [key, { id: key, ...definition, y: engine.physics.heightAt(definition.x, definition.z), status, starts, settlements }];
+        })),
+        battle: battle ? {
+          id: battle.id, monsterId: battle.monsterId, name: catalogue[battle.monsterId].name, hp: battle.combat.enemy_hp, maxHp: battle.combat.enemy_max_hp,
           combo: battle.combat.combo_step, telegraph: battle.combat.telegraph_active,
           phase: battle.clock.phase, phaseUntilTick: battle.clock.phaseUntil,
           phaseRemainingMs: (battle.clock.phaseUntil - state.simTick) * SHARED_STEP_MS,
@@ -156,7 +157,7 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
           defenseRemainingMs: Math.max(0, battle.clock.defenseUntil - state.simTick) * SHARED_STEP_MS,
           strikes: battle.clock.strikes, dodges: battle.combat.dodges_succeeded,
           partyHp: state.players[id].party[0].hp, log: battle.combat.last_combat_log,
-        },
+        } : null,
       };
     };
     const checkCurrent = () => {
@@ -166,7 +167,7 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
       } catch (error) { unavailable = true; throw error; }
     };
     function commit(next) {
-      checkState(next, next.revision, arena);
+      checkState(next, next.revision, arena, catalogue);
       try {
         if (update.run(next.revision, JSON.stringify(next), state.revision, configuration).changes !== 1) {
           throw Error('another host advanced the checkpoint');
@@ -179,33 +180,37 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
     }
 
     function move(next, id, direction) {
-      if (next.battle?.owner === id) throw intentError('player is in battle');
+      if (battleFor(next, id)) throw intentError('player is in battle');
       const player = next.players[id], [dx, dz] = directions[direction];
       const distance = speed * SHARED_STEP_MS / 1000;
       const x = player.x + dx * distance, z = player.z + dz * distance;
       if (Math.abs(x - arena.x) > arena.extent || Math.abs(z - arena.z) > arena.extent ||
           engine.physics.regionAt(x, z)?.name !== arena.region) return;
       const position = engine.physics.stepMovement(player.x, player.z, x, z);
-      // Axis-aligned movement lets us check the nearest point on the accepted step.
-      const contactX = nearestOnStep(arena.x, player.x, position.x);
-      const contactZ = nearestOnStep(arena.z, player.z, position.z);
-      player.x = position.x;
-      player.z = position.z;
-      if (next.monster.status !== 'available' || Math.hypot(contactX - arena.x, contactZ - arena.z) > 2) return;
-      engine.party = player.party;
-      engine.combat = structuredClone(initialCombat);
-      engine._startCombat(encounter);
-      next.battle = { id: encounter.boss_id, owner: id, combat: structuredClone(engine.combat), clock: createBattleClock(next.simTick + 1) };
-      next.monster = { status: 'engaged', starts: 1, settlements: 0 };
+      const contact = Object.entries(catalogue)
+        .filter(([key]) => next.monsters[key].status === 'available')
+        .map(([key, definition]) => ({ key, definition, t: contactFraction(player, position, definition) }))
+        .filter(candidate => Number.isFinite(candidate.t))
+        .sort((a, b) => a.t - b.t || a.key.localeCompare(b.key))[0];
+      player.x = position.x; player.z = position.z;
+      if (!contact) return;
+      const native = battleEngines[id];
+      native.party = player.party;
+      native.combat = structuredClone(initialCombat);
+      native._startCombat({ ...encounter, enemy_name: contact.definition.name });
+      const battleId = randomUUID();
+      next.battles[battleId] = { id: battleId, monsterId: contact.key, owner: id,
+        combat: structuredClone(native.combat), clock: createBattleClock(next.simTick + 1) };
+      next.monsters[contact.key] = { status: 'engaged', starts: 1, settlements: 0, battleId };
     }
 
     function fight(next, id, input) {
-      const battle = next.battle;
-      if (!battle || battle.id !== input.battleId || battle.owner !== id) throw intentError('battle offer is unavailable');
-      performTimedAction(engine, battle, next.players[id].party, input.action, next.simTick);
+      const battle = battleFor(next, id);
+      if (!battle || battle.id !== input.battleId) throw intentError('battle offer is unavailable');
+      performTimedAction(battleEngines[id], battle, next.players[id].party, input.action, next.simTick);
       if (!battle.combat.active) {
-        next.battle = null;
-        next.monster = { status: 'defeated', starts: 1, settlements: 1 };
+        delete next.battles[battle.id];
+        next.monsters[battle.monsterId] = { status: 'defeated', starts: 1, settlements: 1, battleId: battle.id };
       }
     }
 
@@ -220,15 +225,20 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
         for (let step = 0; step < steps; step++) {
           const stepTime = lastAdvance - (steps - step - 1) * SHARED_STEP_MS;
           const next = structuredClone(state);
-          if (next.battle) advanceBattleClock(engine, next.battle, next.players[next.battle.owner].party, next.simTick + 1);
+          for (const key of Object.keys(catalogue)) {
+            const monster = next.monsters[key];
+            if (monster.status !== 'engaged') continue;
+            const battle = next.battles[monster.battleId];
+            advanceBattleClock(battleEngines[battle.owner], battle, next.players[battle.owner].party, next.simTick + 1);
+          }
           const order = next.simTick % 2 ? [...players].reverse() : players;
           for (const id of order) {
             const input = inputs.get(id);
             if (!input) continue;
-            if (input.until <= stepTime || next.battle?.owner === id) { inputs.delete(id); continue; }
+            if (input.until <= stepTime || battleFor(next, id)) { inputs.delete(id); continue; }
             if (input.since > stepTime) continue;
             move(next, id, input.direction);
-            if (next.battle?.owner === id) inputs.delete(id);
+            if (battleFor(next, id)) inputs.delete(id);
           }
           next.simTick++;
           next.revision++;
@@ -262,7 +272,7 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
         advance();
         const next = structuredClone(state);
         // The detached candidate owns every engine field that prototype combat can modify.
-        if (input.type === 'move' && state.battle?.owner === id) throw intentError('player is in battle');
+        if (input.type === 'move' && battleFor(state, id)) throw intentError('player is in battle');
         if (input.type === 'combat') fight(next, id, input);
         next.players[id].seq++;
         next.revision++;
