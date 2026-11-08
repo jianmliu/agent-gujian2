@@ -15,7 +15,7 @@
     "bench:verify": "node ./bench/verify.mjs",
     "bench:board": "node ./bench/board.mjs",
     "host:shared": "node ./bin/agent-gujian2-shared.mjs",
-    "test:shared": "node --test test/shared-battle-clock.test.mjs test/shared-world-continuous.test.mjs test/shared-world-browser.test.mjs"
+    "test:shared": "node --test test/shared-world-parallel.test.mjs test/shared-battle-clock.test.mjs test/shared-world-continuous.test.mjs test/shared-world-browser.test.mjs"
   },
   "devDependencies": {
     "playwright": "1.64.0"

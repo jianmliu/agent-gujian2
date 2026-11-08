@@ -41,7 +41,7 @@ export async function createSharedScene(canvas, initial, terrain) {
   const sun = new THREE.DirectionalLight('#fff1da', 2.4);
   sun.position.set(-15, 30, 12);
   scene.add(sun);
-  const baseHeight = initial.monster.y;
+  const baseHeight = initial.monsters['trial-1'].y;
   scene.add(groundMesh(terrain, texture, baseHeight));
 
   const boundary = [];
@@ -74,12 +74,16 @@ export async function createSharedScene(canvas, initial, terrain) {
     roster.append(item);
   }
 
-  const beast = buildBeast(0x775267, 1.5);
-  beast.group.position.set(0, 0, 0);
-  const beastLabel = makeLabelSprite(initial.monster.name, '#ffd3bd');
-  beastLabel.position.y = 1.65;
-  beast.group.add(beastLabel);
-  scene.add(beast.group);
+  const beasts = new Map();
+  for (const monster of Object.values(initial.monsters)) {
+    const beast = buildBeast(monster.id === 'trial-1' ? 0x775267 : 0x557a61, 1.5);
+    beast.group.position.set(monster.x - initial.arena.x, monster.y - baseHeight, monster.z - initial.arena.z);
+    const label = makeLabelSprite(monster.name, '#ffd3bd');
+    label.position.y = 1.65;
+    beast.group.add(label);
+    scene.add(beast.group);
+    beasts.set(monster.id, beast);
+  }
   if (terrain.props.length) {
     const prototypes = new Map((await loadProps()).map(prop => [prop.name, prop]));
     for (const prop of terrain.props) {
@@ -103,7 +107,7 @@ export async function createSharedScene(canvas, initial, terrain) {
       if (snap) actor.group.position.copy(actor.target);
     }
     if (view?.battle && next.battle?.hp !== view.battle.hp) actors.get(next.self).attackAt = performance.now() / 1000;
-    beast.group.visible = next.monster.status !== 'defeated';
+    for (const [id, beast] of beasts) beast.group.visible = next.monsters[id].status !== 'defeated';
     view = next;
   }
   update(initial);
@@ -143,13 +147,15 @@ export async function createSharedScene(canvas, initial, terrain) {
       const attack = Math.max(0, 1 - (now / 1000 - actor.attackAt) * 3);
       animateChar(actor.parts, speed, now / 1000, attack);
     }
-    animateBeast(beast, 0, now / 1000);
+    for (const beast of beasts.values()) animateBeast(beast, 0, now / 1000);
     target.copy(actors.get(view.self).group.position).add(new THREE.Vector3(0, 1.2, 0));
     camera.position.set(target.x + Math.sin(angle) * distance, target.y + distance * 0.65, target.z + Math.cos(angle) * distance);
     camera.lookAt(target);
     renderer.render(scene, camera);
     canvas.dataset.render = JSON.stringify({
       drawCalls: renderer.info.render.calls,
+      monsters: [...beasts].map(([id, beast]) => ({ id, visible: beast.group.visible,
+        x: beast.group.position.x + view.arena.x, z: beast.group.position.z + view.arena.z })),
       actors: [...actors].map(([id, actor]) => {
         clip.copy(actor.group.position).add(new THREE.Vector3(0, actor.height / 2, 0)).project(camera);
         return {

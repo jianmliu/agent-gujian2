@@ -1,35 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { buildProceduralWorldAssets, Gujian2EngineCore } from '../src/engine_core.js';
-import { openSharedWorld } from '../src/shared-world.js';
+import { fixture, legacyState } from './helpers/shared-world.mjs';
 
-function fixture() {
-  const directory = mkdtempSync(join(tmpdir(), 'gujian-continuous-'));
-  let now = 0;
-  const worldAssets = buildProceduralWorldAssets();
-  const options = {
-    filename: join(directory, 'world.sqlite'), identityId: 'test', now: () => now,
-    assets: { assetId: 'procedural', createEngine: () => new Gujian2EngineCore(worldAssets.meta, worldAssets.heights, worldAssets.propsIndex) },
-  };
-  let world = openSharedWorld(options);
-  return {
-    get world() { return world; },
-    send(id, direction) {
-      const view = world.read(id);
-      return world.submit(id, { epoch: view.epoch, seq: view.nextSeq,
-        ...(direction ? { type: 'move', direction } : { type: 'stop' }) });
-    },
-    elapse(ms) { now += ms; },
-    filename: options.filename,
-    step(ms = 50) { now += ms; world.advance(); },
-    restart() { world.close(); world = null; world = openSharedWorld(options); },
-    close() { world?.close(); rmSync(directory, { recursive: true, force: true }); },
-  };
-}
 
 test('both players travel at four meters per second regardless of renewal frequency', () => {
   const f = fixture();
@@ -97,8 +70,7 @@ test('old checkpoints migrate positions and identities with no transient input',
     const before = f.world.read('a');
     const db = new DatabaseSync(f.filename);
     try {
-      const old = JSON.parse(db.prepare('SELECT state FROM shared_world WHERE id = 1').get().state);
-      old.version = 1; delete old.simTick;
+      const old = legacyState(JSON.parse(db.prepare('SELECT state FROM shared_world WHERE id = 1').get().state), 1);
       db.prepare('UPDATE shared_world SET state = ? WHERE id = 1').run(JSON.stringify(old));
     } finally { db.close(); }
     f.restart();
@@ -131,7 +103,7 @@ test('a late timer preserves steps before lease expiry and stop settles precedin
 function engage(f) {
   f.send('a', 'east');
   for (let i = 0; i < 12 && !f.world.read('a').battle; i++) f.step();
-  assert.equal(f.world.read('a').monster.starts, 1);
+  assert.equal(f.world.read('a').monsters['trial-1'].starts, 1);
   assert(f.world.read('a').battle);
 }
 function combat(f, action, request) {
@@ -188,7 +160,7 @@ test('battle deadlines, duplicate defense, independent exploration and atomic re
       combat(f, 'heavy');
     }
     f.restart(); f.step();
-    assert.equal(f.world.read('a').monster.settlements, 1);
+    assert.equal(f.world.read('a').monsters['trial-1'].settlements, 1);
     assert.equal(f.world.read('a').battle, null);
     assert.throws(() => combat(f, 'dodge', request), /stale/);
   } finally { f.close(); }
@@ -201,8 +173,7 @@ test('v2 engaged checkpoints receive one fresh warning and persist their migrate
     const before = f.world.read('a');
     const db = new DatabaseSync(f.filename);
     try {
-      const old = JSON.parse(db.prepare('SELECT state FROM shared_world WHERE id=1').get().state);
-      old.version = 2; delete old.battle.clock;
+      const old = legacyState(JSON.parse(db.prepare('SELECT state FROM shared_world WHERE id=1').get().state), 2);
       db.prepare('UPDATE shared_world SET state=? WHERE id=1').run(JSON.stringify(old));
     } finally { db.close(); }
     f.restart();
@@ -227,7 +198,7 @@ test('a failed strike commit publishes no damage and restart applies the strike 
       assert.throws(() => f.world.read('a'), /requires restart/);
       const saved = JSON.parse(db.prepare('SELECT state FROM shared_world WHERE id=1').get().state);
       assert.equal(saved.simTick, before.simTick);
-      assert.equal(saved.battle.clock.strikes, 0);
+      assert.equal(Object.values(saved.battles)[0].clock.strikes, 0);
       assert.equal(saved.players.a.party[0].hp, before.battle.partyHp);
       db.exec('DROP TRIGGER fail_write');
     } finally { db.close(); }
@@ -239,14 +210,14 @@ test('a failed strike commit publishes no damage and restart applies the strike 
   } finally { f.close(); }
 });
 
-test('corrupt v3 clock deadlines fail closed at startup', () => {
+test('corrupt v4 clock deadlines fail closed at startup', () => {
   const f = fixture();
   try {
     engage(f);
     const db = new DatabaseSync(f.filename);
     try {
       const saved = JSON.parse(db.prepare('SELECT state FROM shared_world WHERE id=1').get().state);
-      saved.battle.clock.phaseUntil = saved.simTick;
+      Object.values(saved.battles)[0].clock.phaseUntil = saved.simTick;
       db.prepare('UPDATE shared_world SET state=? WHERE id=1').run(JSON.stringify(saved));
     } finally { db.close(); }
     assert.throws(() => f.restart(), /invalid shared-world encounter checkpoint/);
