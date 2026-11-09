@@ -98,7 +98,7 @@ function rewrite(f, change) {
   } finally { db.close(); }
 }
 
-for (const version of [1, 2, 3]) for (const status of ['available', 'engaged', 'defeated']) {
+for (const version of [1, 2, 3, 4]) for (const status of ['available', 'engaged', 'defeated']) {
   test(`v${version} ${status} checkpoint migrates once with stable identity and original progress`, () => {
     const f = fixture();
     try {
@@ -118,7 +118,7 @@ for (const version of [1, 2, 3]) for (const status of ['available', 'engaged', '
         assert.notEqual(migrated.battle.id, 'shared_trial');
         assert.equal(migrated.battle.hp, before.battle.hp);
         assert.equal(migrated.battle.partyHp, before.battle.partyHp);
-        if (version === 3) {
+        if (version >= 3) {
           for (const key of ['phaseUntilTick', 'iframeUntilTick', 'iframeRemainingMs', 'defenseRemainingMs', 'actionRemainingMs']) {
             assert.equal(migrated.battle[key], before.battle[key]);
           }
@@ -127,7 +127,7 @@ for (const version of [1, 2, 3]) for (const status of ['available', 'engaged', '
       const db = new DatabaseSync(f.filename, { readOnly: true });
       try {
         const saved = JSON.parse(db.prepare('SELECT state FROM shared_world WHERE id=1').get().state);
-        assert.equal(saved.version, 4);
+        assert.equal(saved.version, 5);
         assert.equal(saved.revision, before.revision + 1);
         assert.equal(saved.monster, undefined); assert.equal(saved.battle, undefined);
       } finally { db.close(); }
@@ -146,7 +146,9 @@ test('both strikes commit atomically and resume once after a failed simultaneous
     rewrite(f, state => {
       for (const battle of Object.values(state.battles)) {
         battle.clock.phase = 'warning'; battle.clock.phaseUntil = state.simTick + 1;
-        battle.clock.iframeUntil = 0; battle.clock.guardUntil = 0;
+        for (const member of Object.values(battle.participants)) {
+          member.clock.iframeUntil = 0; member.clock.guardUntil = 0;
+        }
       }
     });
     f.restart();
@@ -181,7 +183,7 @@ for (const corruption of ['owner', 'monster', 'id', 'orphan', 'tombstone']) {
       engageBoth(f);
       rewrite(f, state => {
         const [a, b] = Object.values(state.battles);
-        if (corruption === 'owner') b.owner = a.owner;
+        if (corruption === 'owner') b.participants = structuredClone(a.participants);
         if (corruption === 'monster') b.monsterId = a.monsterId;
         if (corruption === 'id') b.id = a.id;
         if (corruption === 'orphan') delete state.battles[a.id];

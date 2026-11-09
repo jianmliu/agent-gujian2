@@ -12,7 +12,7 @@ import { chromium } from 'playwright';
 
 const tokens = ['alpha-test-secret-0000', 'beta-test-secret-00000'];
 
-for (const entry of ['/', '/play3d']) test(entry + ' parallel encounters survive moving and simultaneous battle process deaths', { timeout: 120_000 }, async () => {
+for (const entry of ['/', '/play3d']) for (const cooperative of [false, true]) test(entry + (cooperative ? ' cooperative' : ' parallel') + ' encounters survive disconnect and process deaths', { timeout: 120_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gujian2-continuous-browser-'));
   const filename = join(dir, 'world.sqlite');
   const serverPath = new URL('../bin/agent-gujian2-shared.mjs', import.meta.url);
@@ -49,7 +49,10 @@ for (const entry of ['/', '/play3d']) test(entry + ' parallel encounters survive
     return { child, closed, url };
   }
   async function connect(server, together = true) {
-    return Promise.all(tokens.map(async token => {
+    return Promise.all(tokens.map((_, index) => connectPlayer(server, index, together)));
+  }
+  async function connectPlayer(server, index, together = true) {
+    const token = tokens[index];
       const context = await browser.newContext();
       const page = await context.newPage();
       page.on('pageerror', error => pageErrors.push(error.message));
@@ -67,7 +70,6 @@ for (const entry of ['/', '/play3d']) test(entry + ' parallel encounters survive
         if (together) assert(rendered.actors.every(actor => actor.visible), JSON.stringify(rendered));
       }
       return page;
-    }));
   }
   async function key(page, name, down) {
     await page.keyboard[down ? 'down' : 'up'](name);
@@ -115,7 +117,7 @@ for (const entry of ['/', '/play3d']) test(entry + ' parallel encounters survive
     assert.equal(view.battle.strikes, strikes);
     assert.equal(view.battle.phase, phase);
     assert.equal(view.battle.phaseUntilTick, phaseUntil);
-    assert.equal(view.battle.iframeUntilTick, c.iframeUntil);
+    assert.equal(view.battle.iframeUntilTick, saved.battles[view.battle.id].participants[view.self].clock.iframeUntil);
   }
   async function send(server, index, body) {
     return fetch(server.url + '/intent', {
@@ -132,13 +134,33 @@ for (const entry of ['/', '/play3d']) test(entry + ' parallel encounters survive
     await wait(page, (s, seq) => s.nextSeq >= seq, view.nextSeq);
     return view;
   }
-  async function align(page, z) {
-    const view = await state(page);
-    if (Math.abs(view.players[view.self].z - z) < 0.6) return;
-    const keyName = view.players[view.self].z < z ? 'ArrowDown' : 'ArrowUp';
-    await key(page, keyName, true);
-    await wait(page, (s, target) => !!s.battle || Math.abs(s.players[s.self].z - target) < 0.6, z);
-    await stop(page, keyName);
+  async function authority(server, self) {
+    return (await fetch(server.url + '/state', { headers: { Authorization: 'Bearer ' + tokens[self === 'a' ? 0 : 1] } })).json();
+  }
+  async function waitAuthority(server, self, predicate) {
+    const deadline = performance.now() + 8000;
+    let view;
+    do {
+      view = await authority(server, self);
+      if (predicate(view)) return view;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (performance.now() < deadline);
+    assert.fail('authoritative navigation timeout: ' + JSON.stringify(view));
+  }
+  async function align(page, z, server) {
+    const self = (await state(page)).self;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const view = await authority(server, self);
+      if (view.battle || Math.abs(view.players[self].z - z) < 0.6) return;
+      const sign = view.players[self].z < z ? 1 : -1;
+      const keyName = sign > 0 ? 'ArrowDown' : 'ArrowUp';
+      await key(page, keyName, true);
+      // Observe the server directly so display polling and long frames cannot delay key release.
+      await waitAuthority(server, self, s => !!s.battle || (s.players[self].z - z) * sign >= -0.4);
+      await stop(page, keyName);
+    }
+    const final = await authority(server, self);
+    assert(final.battle || Math.abs(final.players[self].z - z) < 0.6, 'bounded alignment: ' + JSON.stringify(final));
   }
   try {
     let server = await start();
@@ -192,7 +214,7 @@ for (const entry of ['/', '/play3d']) test(entry + ' parallel encounters survive
     assert.deepEqual((await ticks(pages[0], 5)).players, recovered.players, 'restored held input cannot resume movement');
     assert.equal((await send(server, 0, { epoch: old.epoch, seq: old.nextSeq, type: 'move', direction: 'north' })).status, 409);
 
-    await Promise.all(pages.map(page => align(page, initial.arena.z)));
+    for (const page of pages) await align(page, initial.arena.z, server);
     await Promise.all([key(pages[0], 'ArrowRight', true), key(pages[1], 'ArrowLeft', true)]);
     await wait(pages[0], s => s.monsters['trial-1'].status === 'engaged');
     await Promise.all([stop(pages[0], 'ArrowRight'), stop(pages[1], 'ArrowLeft')]);
@@ -209,35 +231,89 @@ for (const entry of ['/', '/play3d']) test(entry + ' parallel encounters survive
     await ticks(pages[1 - winner], 4);
     await stop(pages[1 - winner], 'ArrowUp');
     assert((await state(pages[1 - winner])).players[exploring.self].z < exploring.players[exploring.self].z);
-    const second = exploring.monsters['trial-2'];
-    await align(pages[1 - winner], second.z);
-    if (!(await state(pages[1 - winner])).battle) {
-      const secondPosition = (await state(pages[1 - winner])).players[exploring.self];
-      const approach = secondPosition.x < second.x ? 'ArrowRight' : 'ArrowLeft';
-      await key(pages[1 - winner], approach, true);
-      await wait(pages[1 - winner], s => s.battle?.monsterId === 'trial-2');
-      await stop(pages[1 - winner], approach);
+    if (cooperative) {
+      await align(pages[1 - winner], initial.arena.z, server);
+      const joinEvidence = [];
+      pages[1 - winner].on('response', response => {
+        if (response.url().endsWith('/intent')) joinEvidence.push({ status: response.status(), input: response.request().postDataJSON() });
+      });
+      // The loser of the contact race may have stopped just outside the two-metre join radius.
+      // Approach the occupied monster through real movement until the server offers joining.
+      for (let attempt = 0; !(await state(pages[1 - winner])).joinOffers.length && attempt < 4; attempt++) {
+        const nearby = await state(pages[1 - winner]), position = nearby.players[nearby.self];
+        const monster = nearby.monsters['trial-1'];
+        const dx = monster.x - position.x, dz = monster.z - position.z;
+        console.log('approach join radius', JSON.stringify({ entry, position, monster, distance: Math.hypot(dx, dz) }));
+        const approach = Math.abs(dx) >= Math.abs(dz) ? (dx > 0 ? 'ArrowRight' : 'ArrowLeft') : (dz > 0 ? 'ArrowDown' : 'ArrowUp');
+        await key(pages[1 - winner], approach, true);
+        const axis = Math.abs(dx) >= Math.abs(dz) ? 'x' : 'z';
+        const sign = monster[axis] > position[axis] ? 1 : -1;
+        await waitAuthority(server, nearby.self, s => s.joinOffers.length > 0 ||
+          (s.players[s.self][axis] - monster[axis]) * sign >= 0);
+        await stop(pages[1 - winner], approach);
+      }
+      await wait(pages[1 - winner], s => s.joinOffers.some(offer => offer.monsterId === 'trial-1'));
+      const joinButton = pages[1 - winner].locator('#join-battle-trial-1');
+      await joinButton.focus();
+      await ticks(pages[1 - winner], 6);
+      assert(await joinButton.evaluate(button => button === document.activeElement), 'join target retains keyboard focus across snapshots');
+      const [response] = await Promise.all([
+        pages[1 - winner].waitForResponse(r => r.url().endsWith('/intent') && r.ok() && r.request().postDataJSON().type === 'joinBattle'),
+        joinButton.click({ delay: 250 }),
+      ]).catch(async error => {
+        error.message += '\nJoin evidence ' + JSON.stringify(joinEvidence) + '\nLast view ' + JSON.stringify(await state(pages[1 - winner])) + '\nNotice ' + await pages[1 - winner].locator('#notice').textContent();
+        throw error;
+      });
+      const joined = await response.json();
+      assert.equal(joined.battle.id, pair[winner].battle.id);
+      assert.deepEqual(joined.battle.participants, ['a', 'b']);
+      await wait(pages[1 - winner], s => !!s.battle);
+    } else {
+      const second = exploring.monsters['trial-2'];
+      await align(pages[1 - winner], second.z, server);
+      if (!(await state(pages[1 - winner])).battle) {
+        const secondPosition = (await state(pages[1 - winner])).players[exploring.self];
+        const approach = secondPosition.x < second.x ? 'ArrowRight' : 'ArrowLeft';
+        await key(pages[1 - winner], approach, true);
+        await wait(pages[1 - winner], s => s.battle?.monsterId === 'trial-2');
+        await stop(pages[1 - winner], approach);
+      }
+      assert.equal((await state(pages[1 - winner])).battle.monsterId, 'trial-2');
     }
-    assert.equal((await state(pages[1 - winner])).battle.monsterId, 'trial-2');
     const secondBattle = await fight(pages[1 - winner], 'attack');
     const firstBattle = await state(pages[winner]);
-    assert.notEqual(firstBattle.battle.id, secondBattle.battle.id);
-    for (const [index, wrong] of [[winner, secondBattle], [1 - winner, firstBattle]]) {
+    if (cooperative) assert.equal(firstBattle.battle.id, secondBattle.battle.id);
+    else assert.notEqual(firstBattle.battle.id, secondBattle.battle.id);
+    for (const [index, wrong] of (cooperative ? [] : [[winner, secondBattle], [1 - winner, firstBattle]])) {
       const own = await state(pages[index]);
       assert.equal((await send(server, index, { epoch: own.epoch, seq: own.nextSeq, type: 'combat', battleId: wrong.battle.id, action: 'heavy' })).status, 409);
     }
     const repeat = await send(server, 1 - winner, { epoch: secondBattle.epoch, seq: secondBattle.nextSeq - 1, type: 'combat', battleId: secondBattle.battle.id, action: 'attack' });
     assert.equal(repeat.status, 409);
+    if (cooperative) {
+      const disconnected = await state(pages[winner]);
+      await pages[1 - winner].context().close();
+      const continued = await ticks(pages[winner], 8);
+      assert.deepEqual(continued.battle.participants, ['a', 'b']);
+      assert(continued.simTick > disconnected.simTick);
+      const disconnectedSnapshot = await (await fetch(server.url + '/state', { headers: { Authorization: 'Bearer ' + tokens[1 - winner] } })).json();
+      pages[1 - winner] = await connectPlayer(server, 1 - winner);
+      const rejoined = await state(pages[1 - winner]);
+      assert.equal(rejoined.battle.id, firstBattle.battle.id);
+      assert.deepEqual(rejoined.battle.participants, ['a', 'b']);
+      assert.equal(rejoined.nextSeq, disconnectedSnapshot.nextSeq);
+      assert(rejoined.nextSeq >= secondBattle.nextSeq && rejoined.nextSeq <= secondBattle.nextSeq + 1);
+    }
     // Crash on the accepted response, before a busy 3D frame can delay the DOM acknowledgement.
     const beforeBattle = await fight(pages[winner], 'dodge', () => server.child.kill('SIGKILL'));
     assert(beforeBattle.battle.iframeRemainingMs > 0);
     assert(beforeBattle.battle.hp > 0 && beforeBattle.battle.hp < 600);
     const savedBattle = await killAndRead(server, pages);
-    assert.equal(Object.keys(savedBattle.battles).length, 2);
-    assert(savedBattle.battles[beforeBattle.battle.id].clock.iframeUntil > savedBattle.simTick, 'crash occurred inside live dodge: ' + JSON.stringify({ savedTick: savedBattle.simTick, iframeUntil: savedBattle.battles[beforeBattle.battle.id].clock.iframeUntil }));
+    assert.equal(Object.keys(savedBattle.battles).length, cooperative ? 1 : 2);
+    assert(savedBattle.battles[beforeBattle.battle.id].participants[beforeBattle.self].clock.iframeUntil > savedBattle.simTick, 'crash occurred inside live dodge: ' + JSON.stringify({ savedTick: savedBattle.simTick, iframeUntil: savedBattle.battles[beforeBattle.battle.id].participants[beforeBattle.self].clock.iframeUntil }));
     server = await start();
     const bootView = await (await fetch(server.url + '/state', { headers: { Authorization: 'Bearer ' + tokens[winner] } })).json();
-    assert.equal(bootView.battle.iframeUntilTick, savedBattle.battles[beforeBattle.battle.id].clock.iframeUntil);
+    assert.equal(bootView.battle.iframeUntilTick, savedBattle.battles[beforeBattle.battle.id].participants[beforeBattle.self].clock.iframeUntil);
     assert(bootView.battle.strikes >= savedBattle.battles[beforeBattle.battle.id].clock.strikes);
     const otherBoot = await (await fetch(server.url + '/state', { headers: { Authorization: 'Bearer ' + tokens[1 - winner] } })).json();
     assert.equal(otherBoot.battle.id, secondBattle.battle.id);
@@ -255,7 +331,7 @@ for (const entry of ['/', '/play3d']) test(entry + ' parallel encounters survive
     assert.equal(recovered.battle.iframeUntilTick, beforeBattle.battle.iframeUntilTick);
     await wait(pages[winner], s => s.battle.iframeRemainingMs === 0);
     if (entry === '/play3d' && process.env.GUJIAN2_SCREENSHOTS) {
-      await Promise.all(pages.map((page, index) => page.screenshot({ path: join(process.env.GUJIAN2_SCREENSHOTS, 'parallel-battles-' + index + '.png'), fullPage: true })));
+      await Promise.all(pages.map((page, index) => page.screenshot({ path: join(process.env.GUJIAN2_SCREENSHOTS, (cooperative ? 'cooperative-' : 'parallel-') + index + '.png'), fullPage: true })));
     }
     assert.equal((await send(server, winner, { epoch: beforeBattle.epoch, seq: beforeBattle.nextSeq, type: 'combat', battleId: beforeBattle.battle.id, action: 'heavy' })).status, 409);
     let last;
@@ -264,17 +340,25 @@ for (const entry of ['/', '/play3d']) test(entry + ' parallel encounters survive
     assert.equal(final.monsters['trial-1'].starts, 1);
     assert.equal(final.monsters['trial-1'].settlements, 1);
     assert.equal((await send(server, winner, { epoch: last.epoch, seq: last.nextSeq - 1, type: 'combat', battleId: beforeBattle.battle.id, action: 'heavy' })).status, 409);
-    assert((await state(pages[1 - winner])).battle, 'second encounter remains pending after first settlement');
+    if (cooperative) {
+      assert.equal((await state(pages[1 - winner])).battle, null);
+      assert.deepEqual(final.monsters['trial-1'].victors, ['a', 'b']);
+    } else assert((await state(pages[1 - winner])).battle, 'second encounter remains pending after first settlement');
     const free = await state(pages[winner]);
     await key(pages[winner], 'ArrowUp', true);
     await ticks(pages[winner], 4);
     await stop(pages[winner], 'ArrowUp');
     assert((await state(pages[winner])).players[free.self].z < free.players[free.self].z);
-    for (let i = 0; i < 12 && (await state(pages[1 - winner])).battle; i++) await fight(pages[1 - winner], 'heavy');
-    const bothFinal = await wait(pages[winner], s => Object.values(s.monsters).every(m => m.status === 'defeated'));
-    assert(Object.values(bothFinal.monsters).every(m => m.starts === 1 && m.settlements === 1));
+    if (!cooperative) {
+      for (let i = 0; i < 12 && (await state(pages[1 - winner])).battle; i++) await fight(pages[1 - winner], 'heavy');
+      const bothFinal = await wait(pages[winner], s => Object.values(s.monsters).every(m => m.status === 'defeated'));
+      assert(Object.values(bothFinal.monsters).every(m => m.starts === 1 && m.settlements === 1));
+    } else {
+      assert.equal((await state(pages[winner])).monsters['trial-2'].starts, 0);
+    }
     if (entry === '/play3d') {
-      await pages[winner].waitForFunction(() => JSON.parse(document.querySelector('#scene3d').dataset.render).monsters.every(m => !m.visible));
+      await pages[winner].waitForFunction(coop => JSON.parse(document.querySelector('#scene3d').dataset.render).monsters.every(m =>
+        m.visible === (coop && m.id === 'trial-2')), cooperative);
     }
     const savedFinal = await killAndRead(server, pages);
     server = await start();
@@ -282,7 +366,7 @@ for (const entry of ['/', '/play3d']) test(entry + ' parallel encounters survive
     compareRecovery(savedFinal, settled);
     assert.equal(settled.monsters['trial-1'].settlements, 1);
     assert.equal(settled.battle, null);
-    assert(Object.values(settled.monsters).every(m => m.settlements === 1));
+    assert.equal(settled.monsters['trial-2'].settlements, cooperative ? 0 : 1);
     const otherSettled = await (await fetch(server.url + '/state', { headers: { Authorization: 'Bearer ' + tokens[1 - winner] } })).json();
     assert.equal(otherSettled.battle, null);
     assert.deepEqual(pageErrors, []);

@@ -1,5 +1,5 @@
 let token, current, busy = false, polling = false;
-let desiredDirection = null, inputDirty = false, pendingCombat = null;
+let desiredDirection = null, inputDirty = false, pendingIntent = null;
 
 async function request(path, body) {
   const response = await fetch(path, {
@@ -13,7 +13,7 @@ async function request(path, body) {
 function publish(view) {
   if (current?.epoch === view.epoch && current.revision > view.revision) return;
   if (current && current.epoch !== view.epoch) {
-    desiredDirection = null; inputDirty = false; pendingCombat = null;
+    desiredDirection = null; inputDirty = false; pendingIntent = null;
   }
   current = view;
   if (view.battle && desiredDirection) { desiredDirection = null; inputDirty = true; }
@@ -22,7 +22,7 @@ function publish(view) {
 function failed(error) {
   desiredDirection = null;
   inputDirty = false;
-  pendingCombat = null;
+  pendingIntent = null;
   postMessage({ type: 'error', error: error.message });
 }
 async function pump() {
@@ -31,7 +31,7 @@ async function pump() {
   if (inputDirty) {
     inputDirty = false;
     input = desiredDirection ? { type: 'move', direction: desiredDirection } : { type: 'stop' };
-  } else if (pendingCombat) { input = pendingCombat; pendingCombat = null; }
+  } else if (pendingIntent) { input = pendingIntent; pendingIntent = null; }
   else return;
   busy = true;
   try {
@@ -39,7 +39,7 @@ async function pump() {
   } catch (error) { failed(error); }
   finally {
     busy = false;
-    if (inputDirty || pendingCombat) void pump();
+    if (inputDirty || pendingIntent) void pump();
   }
 }
 self.onmessage = async ({ data }) => {
@@ -62,8 +62,12 @@ self.onmessage = async ({ data }) => {
     desiredDirection = data.direction;
     inputDirty = true;
   }
-  if (data.type === 'combat' && current.battle && !pendingCombat) {
-    pendingCombat = { type: 'combat', battleId: current.battle.id, action: data.action };
+  if (data.type === 'joinBattle' && !current.battle && !pendingIntent && current.joinOffers.some(offer => offer.battleId === data.battleId)) {
+    pendingIntent = { type: 'joinBattle', battleId: data.battleId };
+    if (desiredDirection) { desiredDirection = null; inputDirty = true; }
+  }
+  if (data.type === 'combat' && current.battle && !pendingIntent) {
+    pendingIntent = { type: 'combat', battleId: current.battle.id, action: data.action };
     if (desiredDirection) { desiredDirection = null; inputDirty = true; }
   }
   void pump();

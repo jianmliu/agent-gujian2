@@ -210,7 +210,7 @@ test('a failed strike commit publishes no damage and restart applies the strike 
   } finally { f.close(); }
 });
 
-test('corrupt v4 clock deadlines fail closed at startup', () => {
+test('corrupt v5 clock deadlines fail closed at startup', () => {
   const f = fixture();
   try {
     engage(f);

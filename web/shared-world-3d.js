@@ -106,7 +106,7 @@ export async function createSharedScene(canvas, initial, terrain) {
       actor.target.set(position.x - next.arena.x, position.y - baseHeight, position.z - next.arena.z);
       if (snap) actor.group.position.copy(actor.target);
     }
-    if (view?.battle && next.battle?.hp !== view.battle.hp) actors.get(next.self).attackAt = performance.now() / 1000;
+    if (view?.battle && next.battle?.id === view.battle.id && next.battle.actionUntilTick > view.battle.actionUntilTick) actors.get(next.self).attackAt = performance.now() / 1000;
     for (const [id, beast] of beasts) beast.group.visible = next.monsters[id].status !== 'defeated';
     view = next;
   }

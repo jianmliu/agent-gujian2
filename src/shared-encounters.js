@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { validCooperativeBattle } from './shared-coop-battle.js';
 import { createBattleClock, syncBattleClock, validBattleClock } from './shared-battle-clock.js';
 
 export const sharedEncounter = Object.freeze({
   boss_id: 'shared_trial', vip_monster: false, enemy_name: '荒野试炼怪',
   hp: 600, shield: 0, telegraph_name: '野兽扑击',
 });
-export const battleFor = (state, owner) => Object.values(state.battles).find(b => b.owner === owner);
+export const battleFor = (state, owner) => Object.values(state.battles).find(b => state.version < 5 ? b.owner === owner : Object.hasOwn(b.participants, owner));
 export const freshMonster = () => ({ status: 'available', starts: 0, settlements: 0, battleId: null });
 
 // v4 fixes two spawn instances. Future layout changes require a schema migration.
@@ -61,6 +62,7 @@ export function checkEncounters(state, catalogue) {
   const owners = new Set(), ids = new Set();
   let engaged = 0;
   for (const [id, monster] of Object.entries(state.monsters)) {
+    if (!monster || (monster.status !== 'defeated' && Object.hasOwn(monster, 'victors'))) invalid();
     if (monster.status === 'available') {
       if (monster.starts !== 0 || monster.settlements !== 0 || monster.battleId !== null) invalid();
       continue;
@@ -69,18 +71,20 @@ export function checkEncounters(state, catalogue) {
     ids.add(monster.battleId);
     if (monster.status === 'defeated') {
       if (monster.settlements !== 1 || Object.hasOwn(state.battles, monster.battleId)) invalid();
+      if (monster.victors !== undefined && (!Array.isArray(monster.victors) || ![1, 2].includes(monster.victors.length) ||
+          new Set(monster.victors).size !== monster.victors.length || monster.victors.some(id => !['a', 'b'].includes(id)))) invalid();
       continue;
     }
     if (monster.status !== 'engaged' || monster.settlements !== 0) invalid();
     engaged++;
     const battle = state.battles[monster.battleId];
     if (!battle || battle.id !== monster.battleId || battle.monsterId !== id ||
-        !['a', 'b'].includes(battle.owner) || owners.has(battle.owner) ||
         battle.combat?.active !== true || battle.combat.boss_id !== sharedEncounter.boss_id ||
         battle.combat.enemy_max_hp !== sharedEncounter.hp || !Number.isFinite(battle.combat.enemy_hp) ||
         battle.combat.enemy_hp <= 0 || battle.combat.enemy_hp > sharedEncounter.hp ||
-        !validBattleClock(battle.clock, state.simTick)) invalid();
-    owners.add(battle.owner);
+        (state.version >= 5 ? !validCooperativeBattle(battle, state.simTick, owners) :
+          (!['a', 'b'].includes(battle.owner) || owners.has(battle.owner) || !validBattleClock(battle.clock, state.simTick)))) invalid();
+    if (state.version === 4) owners.add(battle.owner);
   }
   if (engaged !== Object.keys(state.battles).length) invalid();
 }
