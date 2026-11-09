@@ -41,10 +41,23 @@ function render(view) {
   visual?.update(view);
   get('identity').textContent = '玩家' + names[self] + ' · ' + arena.region;
   get('monster').textContent = Object.values(monsters).map(monster => monster.name + ' · ' +
-    ({ available: '可接触', engaged: '战斗中', defeated: '已击败' })[monster.status]).join(' ｜ ');
+    ({ available: '可接触', engaged: '战斗中', defeated: '已击败' })[monster.status] +
+    (monster.victors?.length ? ' · 玩家' + monster.victors.map(id => names[id]).join('、') : '')).join(' ｜ ');
+  const offers = get('join-offers'), offerIdentity = JSON.stringify(view.joinOffers);
+  // Keep pointer targets and keyboard focus stable while the same offers remain available.
+  if (offers.dataset.identity !== offerIdentity) {
+    offers.dataset.identity = offerIdentity;
+    get('join-offers').replaceChildren(...view.joinOffers.map(offer => {
+      const button = document.createElement('button');
+      button.id = 'join-battle-' + offer.monsterId;
+      button.textContent = '加入 ' + offer.name;
+      button.onclick = () => { releaseInput(); network.postMessage({ type: 'joinBattle', battleId: offer.battleId }); };
+      return button;
+    }));
+  }
   get('battle').hidden = !battle;
   get('battle-info').textContent = battle ?
-    battle.name + ' ' + battle.hp + '/' + battle.maxHp + ' · 队伍气血 ' + battle.partyHp + ' · ' + (battle.phase === 'warning' ? '扑击预警 ' : '怪物恢复 ') + battle.phaseRemainingMs + 'ms · 闪避 ' + battle.iframeRemainingMs + 'ms' + (battle.log ? ' · ' + battle.log : '') : '';
+    battle.name + ' · 玩家' + battle.participants.map(id => names[id]).join('、') + ' ' + battle.hp + '/' + battle.maxHp + ' · 队伍气血 ' + battle.partyHp + ' · ' + (battle.phase === 'warning' ? '扑击预警 ' : '怪物恢复 ') + battle.phaseRemainingMs + 'ms · 闪避 ' + battle.iframeRemainingMs + 'ms' + (battle.log ? ' · ' + battle.log : '') : '';
   for (const action of combat) get(action).disabled = !battle || battle.actionRemainingMs > 0 || (['dodge', 'guard'].includes(action) && battle.defenseRemainingMs > 0);
   for (const id of movement) get(id).disabled = !!battle;
   get('world').dataset.view = JSON.stringify(view);

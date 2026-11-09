@@ -1,0 +1,13 @@
+# 双人共同参战实施计划
+
+**目标**：共享敌人和时钟、独立玩家动作，显式加入、断线和冷恢复均可持续完成且胜利只结算一次。
+**架构**：v5参与者组件与公共敌方组件，复用原生动作适配器、固定tick和整体SQLite CAS。
+
+- [x] 基线：现有非浏览器共享测试通过。新增 `test/shared-world-coop.test.mjs`，先观察加入与独立动作断言在旧实现失败。
+- [x] 组件：新建 `src/shared-coop-battle.js`，分割个人统计/截止tick与公共敌方字段，组合临时原生战斗，逐人裁决共同扑击。
+- [x] 执行：修改 `src/shared-encounters.js` 和 `src/shared-world.js` 的查找、v5验证、原子迁移、joinBattle、私有视图与胜利释放；适配旧档夹具，保留分别交战用例。
+- [x] 实玩：地图和3D增加显式加入按钮，网络Worker串行发送；加入及冷却不能被客户端覆写。新增双方实玩共斗、断线重连、SIGKILL和胜利恢复测试。
+- [x] 验收：Node22运行 `npm run test:shared` 和 `npm test`；独立复核、修复有效发现，再验证受影响部分；保存日志截图、更新原型文档。
+- [x] 提交：推送隔离分支、创建并附加PR，确认保持OPEN，暂不合并main。
+
+已提交 [PR #6](https://github.com/jianmliu/agent-gujian2/pull/6)，保持未合并。统一验收共享55/55，normal/pure各15/15。
