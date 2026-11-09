@@ -8,4 +8,6 @@
 - [x] 执行：修改 `src/shared-encounters.js` 和 `src/shared-world.js` 的查找、v5验证、原子迁移、joinBattle、私有视图与胜利释放；适配旧档夹具，保留分别交战用例。
 - [x] 实玩：地图和3D增加显式加入按钮，网络Worker串行发送；加入及冷却不能被客户端覆写。新增双方实玩共斗、断线重连、SIGKILL和胜利恢复测试。
 - [x] 验收：Node22运行 `npm run test:shared` 和 `npm test`；独立复核、修复有效发现，再验证受影响部分；保存日志截图、更新原型文档。
-- [ ] 提交：推送隔离分支、创建并附加PR，确认保持OPEN，暂不合并main。
+- [x] 提交：推送隔离分支、创建并附加PR，确认保持OPEN，暂不合并main。
+
+已提交 [PR #6](https://github.com/jianmliu/agent-gujian2/pull/6)，保持未合并。统一验收共享55/55，normal/pure各15/15。
