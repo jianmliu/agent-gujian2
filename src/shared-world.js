@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Gujian2EngineCore } from './engine_core.js';
 import { createBattleClock, validBattleClock } from './shared-battle-clock.js';
 
+import { upgradeLifecycle, validLifePlayers, settleBattle, resolveDowned, refreshMonsters, revivePlayer, partyHp } from './shared-battle-lifecycle.js';
 import { cooperativeBattle, participantBattle, addParticipant, performCooperativeAction, advanceCooperativeBattle } from './shared-coop-battle.js';
 import { sharedEncounter as encounter, battleFor, freshMonster, encounterCatalogue, migrateEncounters, checkEncounters, contactFraction } from './shared-encounters.js';
 
@@ -60,14 +61,14 @@ function initialState(engine, arena) {
   const newPlayer = dx => ({
     x: arena.x + dx, z: arena.z, seq: 0, party: structuredClone(engine.party),
   });
-  return {
+  return upgradeLifecycle({
     version: 5, simTick: 0, revision: 0, players: { a: newPlayer(-4), b: newPlayer(4) },
     monsters: { 'trial-1': freshMonster(), 'trial-2': freshMonster() }, battles: {},
-  };
+  });
 }
 
 function checkState(state, revision, arena, catalogue) {
-  if (![1, 2, 3, 4, 5].includes(state?.version) ||
+  if (![1, 2, 3, 4, 5, 6].includes(state?.version) ||
       (state.version >= 2 && (!Number.isSafeInteger(state.simTick) || state.simTick < 0)) || state.revision !== revision || !Number.isSafeInteger(revision) || revision < 0 ||
       !players.every(id => {
         const p = state.players?.[id];
@@ -75,6 +76,7 @@ function checkState(state, revision, arena, catalogue) {
           Math.abs(p.x - arena.x) <= arena.extent && Math.abs(p.z - arena.z) <= arena.extent &&
           Number.isSafeInteger(p.seq) && p.seq >= 0 && p.seq <= revision && Array.isArray(p.party) && p.party.length === 4;
       })) throw Error('invalid shared-world checkpoint');
+  if (state.version >= 6 && !validLifePlayers(state.players)) throw Error('invalid shared-world life checkpoint');
   if (state.version >= 4) return checkEncounters(state, catalogue);
   const { monster, battle } = state;
   if (monster?.status === 'available' && monster.starts === 0 && monster.settlements === 0 && battle === null) return;
@@ -123,10 +125,10 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
     let state = JSON.parse(row.state);
     checkState(state, row.revision, arena, catalogue);
     const update = db.prepare('UPDATE shared_world SET revision = ?, state = ? WHERE id = 1 AND revision = ? AND configuration = ?');
-    if (state.version < 5) {
-      const migrated = state.version < 4 ? migrateEncounters(state) : structuredClone(state);
-      migrated.battles = Object.fromEntries(Object.entries(migrated.battles).map(([id, battle]) => [id, cooperativeBattle(battle)]));
-      migrated.version = 5;
+    if (state.version < 6) {
+      let migrated = state.version < 4 ? migrateEncounters(state) : structuredClone(state);
+      if (migrated.version < 5) migrated.battles = Object.fromEntries(Object.entries(migrated.battles).map(([id, battle]) => [id, cooperativeBattle(battle)]));
+      migrated = upgradeLifecycle(migrated);
       migrated.revision++;
       checkState(migrated, migrated.revision, arena, catalogue);
       if (update.run(migrated.revision, JSON.stringify(migrated), state.revision, configuration).changes !== 1) {
@@ -140,22 +142,23 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
       const own = battle && participantBattle(battle, id);
       return {
         epoch, revision: state.revision, simTick: state.simTick, simTimeMs: state.simTick * SHARED_STEP_MS, self: id, arena,
-        nextSeq: state.players[id].seq + 1,
+        nextSeq: state.players[id].seq + 1, life: { ...state.players[id].life },
         players: Object.fromEntries(players.map(key => {
           const { x, z } = state.players[key];
-          return [key, { x, z, y: engine.physics.heightAt(x, z), moving: !!inputs.get(key) && inputs.get(key).until > now() && !battleFor(state, key) }];
+          return [key, { x, z, downed: state.players[key].life.status === 'downed', y: engine.physics.heightAt(x, z), moving: !!inputs.get(key) && inputs.get(key).until > now() && !battleFor(state, key) && state.players[key].life.status === 'alive' }];
         })),
         monsters: Object.fromEntries(Object.entries(catalogue).map(([key, definition]) => {
-          const { status, starts, settlements, victors } = state.monsters[key];
-          return [key, { id: key, ...definition, y: engine.physics.heightAt(definition.x, definition.z), status, starts, settlements,
+          const { status, starts, settlements, victors, generation, refreshes, respawnAt, lastResult } = state.monsters[key];
+          return [key, { id: key, ...definition, y: engine.physics.heightAt(definition.x, definition.z), status, starts, settlements, generation, refreshes, lastResult,
+            respawnRemainingMs: respawnAt === null ? 0 : Math.max(0, respawnAt - state.simTick) * SHARED_STEP_MS,
             ...(victors && { victors }) }];
         })),
-        joinOffers: battle ? [] : Object.values(state.battles).filter(candidate => {
+        joinOffers: battle || state.players[id].life.status === 'downed' ? [] : Object.values(state.battles).filter(candidate => {
           const monster = catalogue[candidate.monsterId], player = state.players[id];
           return Math.hypot(player.x - monster.x, player.z - monster.z) <= 2 + 1e-6;
         }).map(candidate => ({ battleId: candidate.id, monsterId: candidate.monsterId, name: catalogue[candidate.monsterId].name })),
         battle: battle ? {
-          id: battle.id, monsterId: battle.monsterId, name: catalogue[battle.monsterId].name, hp: battle.combat.enemy_hp, maxHp: battle.combat.enemy_max_hp,
+          id: battle.id, generation: battle.generation, downed: state.players[id].life.status === 'downed', monsterId: battle.monsterId, name: catalogue[battle.monsterId].name, hp: battle.combat.enemy_hp, maxHp: battle.combat.enemy_max_hp,
           participants: Object.keys(battle.participants).sort(),
           combo: own.combat.combo_step, telegraph: battle.clock.phase === 'warning',
           phase: battle.clock.phase, phaseUntilTick: battle.clock.phaseUntil,
@@ -167,7 +170,7 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
           actionRemainingMs: Math.max(0, own.clock.actionUntil - state.simTick) * SHARED_STEP_MS,
           defenseRemainingMs: Math.max(0, own.clock.defenseUntil - state.simTick) * SHARED_STEP_MS,
           strikes: battle.clock.strikes, dodges: own.combat.dodges_succeeded,
-          partyHp: state.players[id].party[0].hp, log: own.combat.last_combat_log,
+          partyHp: partyHp(state.players[id].party), log: own.combat.last_combat_log,
         } : null,
       };
     };
@@ -212,21 +215,15 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
       const battleId = randomUUID();
       next.battles[battleId] = cooperativeBattle({ id: battleId, monsterId: contact.key, owner: id,
         combat: structuredClone(native.combat), clock: createBattleClock(next.simTick + 1) });
-      next.monsters[contact.key] = { status: 'engaged', starts: 1, settlements: 0, battleId };
+      next.battles[battleId].generation = next.monsters[contact.key].generation;
+      Object.assign(next.monsters[contact.key], { status: 'engaged', starts: next.monsters[contact.key].starts + 1, battleId });
     }
 
     function fight(next, id, input) {
       const battle = battleFor(next, id);
       if (!battle || battle.id !== input.battleId) throw intentError('battle offer is unavailable');
       performCooperativeAction(battleEngines[id], battle, id, next.players[id].party, input.action, next.simTick);
-      if (!battle.combat.active) {
-        delete next.battles[battle.id];
-        next.monsters[battle.monsterId] = { status: 'defeated', starts: 1, settlements: 1, battleId: battle.id,
-          victors: Object.keys(battle.participants).sort() };
-        for (const member of Object.keys(battle.participants)) {
-          for (const role of next.players[member].party) if (role.in_team) role.hp = role.max_hp;
-        }
-      }
+      if (!battle.combat.active) settleBattle(next, battle, 'victory', next.simTick);
     }
 
     function joinBattle(next, id, input) {
@@ -251,17 +248,19 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
         for (let step = 0; step < steps; step++) {
           const stepTime = lastAdvance - (steps - step - 1) * SHARED_STEP_MS;
           const next = structuredClone(state);
+          refreshMonsters(next, next.simTick + 1);
           for (const key of Object.keys(catalogue)) {
             const monster = next.monsters[key];
             if (monster.status !== 'engaged') continue;
             const battle = next.battles[monster.battleId];
             advanceCooperativeBattle(battleEngines, battle, next.players, next.simTick + 1);
+            resolveDowned(next, battle, next.simTick + 1);
           }
           const order = next.simTick % 2 ? [...players].reverse() : players;
           for (const id of order) {
             const input = inputs.get(id);
             if (!input) continue;
-            if (input.until <= stepTime || battleFor(next, id)) { inputs.delete(id); continue; }
+            if (input.until <= stepTime || battleFor(next, id) || next.players[id].life.status === 'downed') { inputs.delete(id); continue; }
             if (input.since > stepTime) continue;
             move(next, id, input.direction);
             if (battleFor(next, id)) inputs.delete(id);
@@ -297,10 +296,12 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
         if (input.epoch !== epoch || input.seq !== state.players[id].seq + 1) throw intentError('stale intent');
         advance();
         const next = structuredClone(state);
+        if (next.players[id].life.status === 'downed' && !['stop', 'revive'].includes(input.type)) throw intentError('player is downed');
         // The detached candidate owns every engine field that prototype combat can modify.
         if (input.type === 'move' && battleFor(state, id)) throw intentError('player is in battle');
         if (input.type === 'combat') fight(next, id, input);
         if (input.type === 'joinBattle') joinBattle(next, id, input);
+        if (input.type === 'revive') revivePlayer(next, id, input.downId, arena);
         next.players[id].seq++;
         next.revision++;
         commit(next);
@@ -309,7 +310,7 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
           const since = previous?.direction === input.direction && previous.until > time ? previous.since : time;
           inputs.set(id, { direction: input.direction, since, until: time + SHARED_INPUT_TTL_MS });
         }
-        if (input.type === 'stop' || input.type === 'joinBattle') inputs.delete(id);
+        if (input.type === 'stop' || input.type === 'joinBattle' || input.type === 'revive') inputs.delete(id);
         return view(id);
       },
       close() { db.close(); },
@@ -323,6 +324,7 @@ export function openSharedWorld({ filename, assets, identityId, now = () => perf
 export function validateSharedIntent(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.epoch !== 'string' ||
       !Number.isSafeInteger(input.seq) || input.seq < 1) return false;
+  if (input.type === 'revive') return Object.keys(input).length === 4 && typeof input.downId === 'string';
   if (input.type === 'joinBattle') return Object.keys(input).length === 4 && typeof input.battleId === 'string';
   if (input.type === 'stop') return Object.keys(input).length === 3;
   if (input.type === 'move') {

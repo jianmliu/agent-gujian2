@@ -1,3 +1,4 @@
+import { validMonsterCycle } from './shared-battle-lifecycle.js';
 import { randomUUID } from 'node:crypto';
 import { validCooperativeBattle } from './shared-coop-battle.js';
 import { createBattleClock, syncBattleClock, validBattleClock } from './shared-battle-clock.js';
@@ -63,19 +64,24 @@ export function checkEncounters(state, catalogue) {
   let engaged = 0;
   for (const [id, monster] of Object.entries(state.monsters)) {
     if (!monster || (monster.status !== 'defeated' && Object.hasOwn(monster, 'victors'))) invalid();
+    if (state.version >= 6 && !validMonsterCycle(monster, state.simTick)) invalid();
+    if (state.version >= 6 && monster.lastResult && monster.lastResult.battleId !== monster.battleId) {
+      if (ids.has(monster.lastResult.battleId)) invalid();
+      ids.add(monster.lastResult.battleId);
+    }
     if (monster.status === 'available') {
-      if (monster.starts !== 0 || monster.settlements !== 0 || monster.battleId !== null) invalid();
+      if (state.version < 6 && (monster.starts !== 0 || monster.settlements !== 0 || monster.battleId !== null)) invalid();
       continue;
     }
-    if (!uuid(monster.battleId) || ids.has(monster.battleId) || monster.starts !== 1) invalid();
+    if (!uuid(monster.battleId) || ids.has(monster.battleId) || (state.version < 6 && monster.starts !== 1)) invalid();
     ids.add(monster.battleId);
     if (monster.status === 'defeated') {
-      if (monster.settlements !== 1 || Object.hasOwn(state.battles, monster.battleId)) invalid();
-      if (monster.victors !== undefined && (!Array.isArray(monster.victors) || ![1, 2].includes(monster.victors.length) ||
+      if ((state.version < 6 && monster.settlements !== 1) || Object.hasOwn(state.battles, monster.battleId)) invalid();
+      if (monster.victors !== undefined && (!Array.isArray(monster.victors) || !(state.version >= 6 ? [0, 1, 2] : [1, 2]).includes(monster.victors.length) ||
           new Set(monster.victors).size !== monster.victors.length || monster.victors.some(id => !['a', 'b'].includes(id)))) invalid();
       continue;
     }
-    if (monster.status !== 'engaged' || monster.settlements !== 0) invalid();
+    if (monster.status !== 'engaged' || (state.version < 6 && monster.settlements !== 0)) invalid();
     engaged++;
     const battle = state.battles[monster.battleId];
     if (!battle || battle.id !== monster.battleId || battle.monsterId !== id ||
@@ -84,6 +90,8 @@ export function checkEncounters(state, catalogue) {
         battle.combat.enemy_hp <= 0 || battle.combat.enemy_hp > sharedEncounter.hp ||
         (state.version >= 5 ? !validCooperativeBattle(battle, state.simTick, owners) :
           (!['a', 'b'].includes(battle.owner) || owners.has(battle.owner) || !validBattleClock(battle.clock, state.simTick)))) invalid();
+    if (state.version >= 6 && (battle.generation !== monster.generation ||
+        Object.keys(battle.participants).every(id => state.players[id].life.status === 'downed'))) invalid();
     if (state.version === 4) owners.add(battle.owner);
   }
   if (engaged !== Object.keys(state.battles).length) invalid();

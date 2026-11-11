@@ -98,7 +98,7 @@ function rewrite(f, change) {
   } finally { db.close(); }
 }
 
-for (const version of [1, 2, 3, 4]) for (const status of ['available', 'engaged', 'defeated']) {
+for (const version of [1, 2, 3, 4, 5]) for (const status of ['available', 'engaged', 'defeated']) {
   test(`v${version} ${status} checkpoint migrates once with stable identity and original progress`, () => {
     const f = fixture();
     try {
@@ -127,7 +127,7 @@ for (const version of [1, 2, 3, 4]) for (const status of ['available', 'engaged'
       const db = new DatabaseSync(f.filename, { readOnly: true });
       try {
         const saved = JSON.parse(db.prepare('SELECT state FROM shared_world WHERE id=1').get().state);
-        assert.equal(saved.version, 5);
+        assert.equal(saved.version, 6);
         assert.equal(saved.revision, before.revision + 1);
         assert.equal(saved.monster, undefined); assert.equal(saved.battle, undefined);
       } finally { db.close(); }

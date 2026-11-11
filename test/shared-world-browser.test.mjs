@@ -12,7 +12,8 @@ import { chromium } from 'playwright';
 
 const tokens = ['alpha-test-secret-0000', 'beta-test-secret-00000'];
 
-for (const entry of ['/', '/play3d']) for (const cooperative of [false, true]) test(entry + (cooperative ? ' cooperative' : ' parallel') + ' encounters survive disconnect and process deaths', { timeout: 120_000 }, async () => {
+for (const entry of ['/', '/play3d']) for (const mode of ['parallel', 'cooperative', 'lifecycle']) test(entry + ' ' + mode + ' encounters survive disconnect and process deaths', { timeout: mode === 'lifecycle' ? 180_000 : 120_000 }, async () => {
+  const cooperative = mode !== 'parallel';
   const dir = await mkdtemp(join(tmpdir(), 'gujian2-continuous-browser-'));
   const filename = join(dir, 'world.sqlite');
   const serverPath = new URL('../bin/agent-gujian2-shared.mjs', import.meta.url);
@@ -137,8 +138,8 @@ for (const entry of ['/', '/play3d']) for (const cooperative of [false, true]) t
   async function authority(server, self) {
     return (await fetch(server.url + '/state', { headers: { Authorization: 'Bearer ' + tokens[self === 'a' ? 0 : 1] } })).json();
   }
-  async function waitAuthority(server, self, predicate) {
-    const deadline = performance.now() + 8000;
+  async function waitAuthority(server, self, predicate, timeout = 8000) {
+    const deadline = performance.now() + timeout;
     let view;
     do {
       view = await authority(server, self);
@@ -178,6 +179,87 @@ for (const entry of ['/', '/play3d']) for (const cooperative of [false, true]) t
     assert.equal((await send(server, 0, { epoch: initial.epoch, seq: initial.nextSeq, type: 'move', direction: ['east'] })).status, 400);
     assert.equal(await a.locator('[data-player="b"]').count(), 1);
     assert.equal(await b.locator('[data-player="a"]').count(), 1);
+
+    if (mode === 'lifecycle') {
+      async function startPair(delayedJoin) {
+        await key(pages[0], 'ArrowRight', true);
+        await waitAuthority(server, 'a', s => !!s.battle);
+        await stop(pages[0], 'ArrowRight');
+        const created = await authority(server, 'a');
+        if (delayedJoin) await waitAuthority(server, 'a', s => s.battle.strikes > 0);
+        for (let attempt = 0; !(await authority(server, 'b')).joinOffers.length && attempt < 4; attempt++) {
+          const v = await authority(server, 'b');
+          const direction = v.players.b.x > v.arena.x ? 'ArrowLeft' : 'ArrowRight';
+          await key(pages[1], direction, true);
+          await waitAuthority(server, 'b', s => s.joinOffers.length > 0);
+          await stop(pages[1], direction);
+        }
+        await wait(pages[1], s => s.joinOffers.length > 0);
+        const [response] = await Promise.all([
+          pages[1].waitForResponse(r => r.url().endsWith('/intent') && r.ok() && r.request().postDataJSON().type === 'joinBattle'),
+          pages[1].locator('#join-battle-trial-1').click(),
+        ]);
+        assert.equal((await response.json()).battle.id, created.battle.id);
+        await wait(pages[1], s => !!s.battle);
+        return created.battle.id;
+      }
+      const firstId = await startPair(true);
+      const fallen = await waitAuthority(server, 'a', s => s.life.status === 'downed', 25000);
+      assert((await authority(server, 'b')).battle);
+      assert.equal((await authority(server, 'b')).life.status, 'alive');
+      const continued = await fight(pages[1], 'attack');
+      assert.equal(continued.battle.id, firstId);
+      await wait(pages[0], s => s.life.status === 'downed');
+      assert.equal(await pages[0].locator('#attack').isDisabled(), true);
+      await waitAuthority(server, 'b', s => s.life.status === 'downed', 12000);
+      await wait(pages[1], s => s.life.status === 'downed');
+      const lost = await authority(server, 'a');
+      assert.equal(lost.battle, null);
+      assert.equal(lost.monsters['trial-1'].lastResult.outcome, 'defeat');
+      for (const page of pages) {
+        await page.locator('#revive').click();
+        await wait(page, s => s.life.status === 'alive');
+      }
+      const revived = await authority(server, 'a');
+      assert.equal(revived.players.a.x, revived.arena.x - 4);
+      assert.equal(revived.players.b.x, revived.arena.x + 4);
+      await waitAuthority(server, 'a', s => s.monsters['trial-1'].status === 'available', 12000);
+      const secondId = await startPair(false);
+      assert.notEqual(secondId, firstId);
+      let current = await authority(server, 'a');
+      assert.equal((await send(server, 0, { epoch: current.epoch, seq: current.nextSeq, type: 'combat', battleId: firstId, action: 'heavy' })).status, 409);
+      for (let i = 0; i < 10 && (await authority(server, 'a')).battle; i++) await fight(pages[i % 2], 'heavy');
+      await wait(pages[0], s => !s.battle);
+      await wait(pages[1], s => !s.battle);
+      const won = await authority(server, 'a');
+      assert.equal(won.monsters['trial-1'].lastResult.outcome, 'victory');
+      assert.equal(won.monsters['trial-1'].settlements, 2);
+      assert.deepEqual(won.monsters['trial-1'].victors, ['a', 'b']);
+      if (process.env.GUJIAN2_SCREENSHOTS) await pages[0].screenshot({ path: join(process.env.GUJIAN2_SCREENSHOTS, entry === '/play3d' ? 'lifecycle-3d.png' : 'lifecycle-map.png'), fullPage: true });
+      const port = Number(new URL(server.url).port);
+      const saved = await killAndRead(server, pages, false);
+      server = await start(port);
+      const boot = await authority(server, 'a');
+      assert.equal(boot.monsters['trial-1'].respawnRemainingMs, (saved.monsters['trial-1'].respawnAt - boot.simTick) * 50);
+      assert.equal(boot.monsters['trial-1'].refreshes, 1);
+      await Promise.all(pages.map(page => wait(page, (s, epoch) => s.epoch !== epoch, won.epoch)));
+      await waitAuthority(server, 'a', s => s.monsters['trial-1'].status === 'available', 12000);
+      await ticks(pages[0], 4);
+      const refreshed = await authority(server, 'a');
+      assert.equal(refreshed.monsters['trial-1'].generation, 3);
+      assert.equal(refreshed.monsters['trial-1'].refreshes, 2);
+      assert.equal(refreshed.monsters['trial-1'].settlements, 2);
+      await key(pages[0], 'ArrowRight', true);
+      await waitAuthority(server, 'a', s => !!s.battle);
+      await stop(pages[0], 'ArrowRight');
+      current = await authority(server, 'a');
+      assert.equal(current.battle.generation, 3);
+      assert.notEqual(current.battle.id, secondId);
+      assert.equal((await send(server, 0, { epoch: current.epoch, seq: current.nextSeq, type: 'combat', battleId: secondId, action: 'heavy' })).status, 409);
+      assert.equal((await send(server, 0, { epoch: current.epoch, seq: current.nextSeq, type: 'revive', downId: fallen.life.downId })).status, 409);
+      assert.deepEqual(pageErrors, []);
+      return;
+    }
 
     await Promise.all(pages.map(page => key(page, 'ArrowUp', true)));
     const moving = await wait(a, s => s.players.a.moving && s.players.b.moving);

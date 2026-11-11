@@ -16,7 +16,7 @@ function publish(view) {
     desiredDirection = null; inputDirty = false; pendingIntent = null;
   }
   current = view;
-  if (view.battle && desiredDirection) { desiredDirection = null; inputDirty = true; }
+  if ((view.battle || view.life.status === 'downed') && desiredDirection) { desiredDirection = null; inputDirty = true; }
   postMessage({ type: 'view', view });
 }
 function failed(error) {
@@ -62,11 +62,15 @@ self.onmessage = async ({ data }) => {
     desiredDirection = data.direction;
     inputDirty = true;
   }
+  if (data.type === 'revive' && current.life.status === 'downed' && !pendingIntent && current.life.downId === data.downId) {
+    pendingIntent = { type: 'revive', downId: data.downId };
+    desiredDirection = null;
+  }
   if (data.type === 'joinBattle' && !current.battle && !pendingIntent && current.joinOffers.some(offer => offer.battleId === data.battleId)) {
     pendingIntent = { type: 'joinBattle', battleId: data.battleId };
     if (desiredDirection) { desiredDirection = null; inputDirty = true; }
   }
-  if (data.type === 'combat' && current.battle && !pendingIntent) {
+  if (data.type === 'combat' && current.life.status === 'alive' && current.battle && !pendingIntent) {
     pendingIntent = { type: 'combat', battleId: current.battle.id, action: data.action };
     if (desiredDirection) { desiredDirection = null; inputDirty = true; }
   }
@@ -74,7 +78,7 @@ self.onmessage = async ({ data }) => {
 };
 setInterval(async () => {
   if (!current || !token) return;
-  if (desiredDirection && !current.battle) {
+  if (desiredDirection && !current.battle && current.life.status === 'alive') {
     inputDirty = true;
     void pump();
   }
