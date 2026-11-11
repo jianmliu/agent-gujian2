@@ -2146,7 +2146,7 @@ export class Gujian2EngineCore {
     // 同伴 AI 协同连携攻击 + 阿阮【春风化雨】自动群体治疗 + 偃甲协同输出
     let companionDmg = 0;
     for (let i = 0; i < this.party.length; i++) {
-      if (i === this.leaderIdx || !this.party[i].in_team) continue;
+      if (i === this.leaderIdx || !this.party[i].in_team || (opts.livingOnly && this.party[i].hp <= 0)) continue;
       const ally = this.party[i];
       companionDmg += Math.round(ally.attack * 0.65);
       this.combat.companion_attacks++;
@@ -2186,7 +2186,7 @@ export class Gujian2EngineCore {
   }
 
   // Shared simulation invokes this at its persisted deadline; legacy calls it per action.
-  resolveEnemyAttack({ timed = false } = {}) {
+  resolveEnemyAttack({ timed = false, lethal = false } = {}) {
     const leader = this.party[this.leaderIdx] || this.party[0];
     let log = '';
     if (timed && (this.combat.iframe_timer > 0 || this.combat.guard_active)) {
@@ -2201,12 +2201,12 @@ export class Gujian2EngineCore {
     if (this.combat.telegraph_active && this.combat.iframe_timer <= 0 && !this.combat.guard_active) {
       // 受到 Boss AOE 伤害
       for (const m of this.party) {
-        if (m.in_team) m.hp = Math.max(40, m.hp - 35);
+        if (m.in_team) m.hp = Math.max(lethal ? 0 : 40, m.hp - 35);
       }
       this.combat.telegraph_active = false;
     } else {
       // 普通反击伤害
-      leader.hp = Math.max(50, leader.hp - 18);
+      leader.hp = Math.max(lethal ? 0 : 50, leader.hp - 18);
       // 下一轮概率再次亮起红圈预警
       if (this.combat.enemy_hp < this.combat.enemy_max_hp * 0.65) {
         this.combat.telegraph_active = true;
@@ -2215,11 +2215,11 @@ export class Gujian2EngineCore {
 
     // 阿阮在队时自动触发同伴 AI【春风化雨】群体治疗
     const aruan = this.party[3];
-    if (aruan && aruan.in_team) {
-      const needHeal = this.party.some((m) => m.in_team && m.hp < m.max_hp);
+    if (aruan && aruan.in_team && (!lethal || aruan.hp > 0)) {
+      const needHeal = this.party.some((m) => m.in_team && (!lethal || m.hp > 0) && m.hp < m.max_hp);
       if (needHeal) {
         for (const m of this.party) {
-          if (m.in_team) m.hp = Math.min(m.max_hp, m.hp + 45);
+          if (m.in_team && (!lethal || m.hp > 0)) m.hp = Math.min(m.max_hp, m.hp + 45);
         }
         this.combat.companion_heals++;
         log += ' 阿阮同伴 AI 自动吹奏巴乌施展【春风化雨】为全队恢复气血！';

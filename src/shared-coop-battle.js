@@ -1,3 +1,4 @@
+import { livingLeader } from './shared-battle-lifecycle.js';
 import { syncBattleClock, validBattleClock, performTimedAction } from './shared-battle-clock.js';
 
 const personalFields = ['combo_step', 'victories', 'dodges_succeeded', 'shields_broken',
@@ -29,7 +30,8 @@ export function addParticipant(battle, id, initialCombat) {
 }
 export function performCooperativeAction(engine, battle, id, party, action, tick) {
   const temporary = participantBattle(battle, id);
-  performTimedAction(engine, temporary, party, action, tick);
+  engine.leaderIdx = livingLeader(party);
+  performTimedAction(engine, temporary, party, action, tick, { livingOnly: true });
   saveParticipant(battle, id, temporary);
   battle.combat = sharedCombat(temporary.combat);
 }
@@ -38,10 +40,12 @@ export function advanceCooperativeBattle(engines, battle, parties, tick) {
   if (tick < c.phaseUntil) return;
   if (c.phase === 'warning') {
     for (const id of Object.keys(battle.participants).sort()) {
+      if (parties[id].life?.status === 'downed') continue;
       const temporary = participantBattle(battle, id), engine = engines[id];
       syncBattleClock(temporary, tick);
       engine.party = parties[id].party; engine.combat = temporary.combat;
-      temporary.combat.last_combat_log = engine.resolveEnemyAttack({ timed: true });
+      engine.leaderIdx = livingLeader(engine.party);
+      temporary.combat.last_combat_log = engine.resolveEnemyAttack({ timed: true, lethal: true });
       temporary.clock.guardUntil = 0;
       saveParticipant(battle, id, temporary);
     }

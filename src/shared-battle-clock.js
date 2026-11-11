@@ -39,14 +39,14 @@ export function advanceBattleClock(engine, battle, party, tick) {
   }
 }
 
-export function performTimedAction(engine, battle, party, action, tick) {
+export function performTimedAction(engine, battle, party, action, tick, { livingOnly = false } = {}) {
   const c = battle.clock, defense = action === 'dodge' || action === 'guard';
   if (tick < c.actionUntil || (defense && tick < c.defenseUntil)) {
     throw Object.assign(Error('combat action cooldown'), { status: 409 });
   }
   engine.party = party; engine.combat = battle.combat;
   syncBattleClock(battle, tick);
-  engine.combatAction(action, { deferEnemyAttack: true });
+  engine.combatAction(action, { deferEnemyAttack: true, livingOnly });
   c.actionUntil = tick + 6;
   if (defense) {
     c.defenseUntil = tick + 18;

@@ -26,7 +26,7 @@ function render(view) {
   if (current?.epoch === view.epoch && current.revision > view.revision) return;
   if (current && current.epoch !== view.epoch) { heldKeys.clear(); desiredDirection = null; }
   current = view;
-  if (view.battle && desiredDirection) setDirection(null);
+  if ((view.battle || view.life.status === 'downed') && desiredDirection) setDirection(null);
   const { self, arena, monsters, players, battle } = view;
   const markers = get('markers');
   if (markers) {
@@ -40,8 +40,12 @@ function render(view) {
   }
   visual?.update(view);
   get('identity').textContent = '玩家' + names[self] + ' · ' + arena.region;
+  const downed = view.life.status === 'downed';
+  get('life-info').textContent = downed ? '队伍已倒下，可复活返回出生点。' : '';
+  get('revive').hidden = !downed;
   get('monster').textContent = Object.values(monsters).map(monster => monster.name + ' · ' +
-    ({ available: '可接触', engaged: '战斗中', defeated: '已击败' })[monster.status] +
+    ({ available: '可接触', engaged: '战斗中', defeated: monster.lastResult?.outcome === 'defeat' ? '战败重置中' : '已击败' })[monster.status] +
+    (monster.status === 'defeated' ? ' · 刷新 ' + (monster.respawnRemainingMs / 1000).toFixed(1) + ' 秒' : '') +
     (monster.victors?.length ? ' · 玩家' + monster.victors.map(id => names[id]).join('、') : '')).join(' ｜ ');
   const offers = get('join-offers'), offerIdentity = JSON.stringify(view.joinOffers);
   // Keep pointer targets and keyboard focus stable while the same offers remain available.
@@ -57,9 +61,9 @@ function render(view) {
   }
   get('battle').hidden = !battle;
   get('battle-info').textContent = battle ?
-    battle.name + ' · 玩家' + battle.participants.map(id => names[id]).join('、') + ' ' + battle.hp + '/' + battle.maxHp + ' · 队伍气血 ' + battle.partyHp + ' · ' + (battle.phase === 'warning' ? '扑击预警 ' : '怪物恢复 ') + battle.phaseRemainingMs + 'ms · 闪避 ' + battle.iframeRemainingMs + 'ms' + (battle.log ? ' · ' + battle.log : '') : '';
-  for (const action of combat) get(action).disabled = !battle || battle.actionRemainingMs > 0 || (['dodge', 'guard'].includes(action) && battle.defenseRemainingMs > 0);
-  for (const id of movement) get(id).disabled = !!battle;
+    battle.name + ' · 玩家' + battle.participants.map(id => names[id] + (players[id].downed ? '（倒下）' : '')).join('、') + ' ' + battle.hp + '/' + battle.maxHp + ' · 队伍气血 ' + battle.partyHp + ' · ' + (battle.phase === 'warning' ? '扑击预警 ' : '怪物恢复 ') + battle.phaseRemainingMs + 'ms · 闪避 ' + battle.iframeRemainingMs + 'ms' + (battle.log ? ' · ' + battle.log : '') : '';
+  for (const action of combat) get(action).disabled = downed || !battle || battle.actionRemainingMs > 0 || (['dodge', 'guard'].includes(action) && battle.defenseRemainingMs > 0);
+  for (const id of movement) get(id).disabled = downed || !!battle;
   get('world').dataset.view = JSON.stringify(view);
   get('world').hidden = false;
 }
@@ -128,12 +132,15 @@ for (const direction of movement) {
     }
   });
 }
+get('revive').onclick = () => {
+  if (current?.life.status === 'downed') network.postMessage({ type: 'revive', downId: current.life.downId });
+};
 for (const action of combat) get(action).onclick = () => {
   if (current?.battle) network.postMessage({ type: 'combat', action });
 };
 window.addEventListener('keydown', event => {
   const direction = keyboard[event.key];
-  if (current && direction && !current.battle && event.target.tagName !== 'INPUT') {
+  if (current && direction && !current.battle && current.life.status === 'alive' && event.target.tagName !== 'INPUT') {
     event.preventDefault();
     if (heldKeys.has(event.key) || event.repeat) return;
     heldKeys.set(event.key, direction);

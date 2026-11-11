@@ -30,9 +30,18 @@ export function fixture() {
   };
 }
 
-// Reconstruct the actual pre-v5 disk schema for migration regression fixtures.
+// Reconstruct the actual pre-v6 disk schema for migration regression fixtures.
 export function legacyState(current, version) {
   const state = structuredClone(current);
+  if (state.version === 6) {
+    for (const player of Object.values(state.players)) delete player.life;
+    for (const monster of Object.values(state.monsters)) {
+      for (const key of ['generation', 'refreshes', 'respawnAt', 'lastResult']) delete monster[key];
+    }
+    for (const battle of Object.values(state.battles)) delete battle.generation;
+    state.version = 5;
+  }
+  if (version === 5) return state;
   if (state.version === 5) {
     state.battles = Object.fromEntries(Object.values(state.battles).map(battle => {
       const [owner] = Object.keys(battle.participants);
